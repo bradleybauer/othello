@@ -6,9 +6,10 @@ class Policy(nn.Module):
     def __init__(self, input_dim: int) -> None:
         super(Policy, self).__init__()
         input_dim: int = input_dim
-        self.fc1: nn.Linear = nn.Linear(input_dim, 128)
-        self.fc2: nn.Linear = nn.Linear(128, 128)
-        self.fc3: nn.Linear = nn.Linear(128, input_dim + 1)  # all possible board positions + the NOOP action
+        hidden_dim: int = 512
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, input_dim + 1)  # all possible board positions + the NOOP action
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.fc1(x))
@@ -32,10 +33,7 @@ class Policy(nn.Module):
         logits = self.forward(observation)
         probs = masked_softmax(logits, mask, dim=1)
         dist = torch.distributions.Categorical(probs)
-        if self.training:
-            flat_action = dist.sample()
-        else:
-            flat_action = torch.argmax(dist.probs, dim=-1)
+        flat_action = dist.sample()
         return flat_action
     
     def log_probs(self, observation: torch.Tensor, flat_action: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
