@@ -139,7 +139,7 @@ class OthelloEnv(gym.Env):
         if done:
             score_white = self.game.get_score(othello.WHITE)
             score_black = self.game.get_score(othello.BLACK)
-            reward = 1 if score_white != score_black else 0 # you win or draw
+            reward = 1 if score_black > score_white else 0 if score_black == score_white else -1
         else: # step opponent
             action_mask = info['action_mask']
             with torch.no_grad():
@@ -151,7 +151,7 @@ class OthelloEnv(gym.Env):
             if done:
                 score_white = self.game.get_score(othello.WHITE)
                 score_black = self.game.get_score(othello.BLACK)
-                reward = -1 if score_white != score_black else 0 # opponent wins or draw
+                reward = 1 if score_black > score_white else 0 if score_black == score_white else -1
             else:
                 reward = 0
 
