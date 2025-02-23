@@ -25,7 +25,7 @@ class Policy(nn.Module):
             torch.Tensor: The output logits.
         """
         # Flatten the board.
-        x = observation.view(observation.size(0), -1)
+        x = observation.view(1, -1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
@@ -51,28 +51,20 @@ class Policy(nn.Module):
 
         # Create a categorical distribution and sample a flat action index.
         dist = torch.distributions.Categorical(probs)
-        flat_action = dist.sample()  # Shape: (batch_size,)
+        flat_action = dist.sample()
         log_prob = dist.log_prob(flat_action)
 
-        total_moves = self.board_size * self.board_size
-        # Convert flat action to a 2D [row, col] pair.
-        # For normal moves:
-        #    row = action // board_size, col = action % board_size.
-        # For NOOP (flat_action == total_moves):
-        #    row = board_size (indicating NOOP), col = 0 (a canonical value).
-        is_normal = flat_action < total_moves
-        row: torch.Tensor = torch.where(
-            is_normal,
-            flat_action // self.board_size,
-            torch.full_like(flat_action, self.board_size)
-        )
-        col: torch.Tensor = torch.where(
-            is_normal,
-            flat_action % self.board_size,
-            torch.zeros_like(flat_action)
-        )
-        action = torch.stack([row, col], dim=1)
+        flat_action = flat_action.item()
 
+        # NOOP action has representation [board_size, 0].
+        if flat_action == self.board_size * self.board_size:
+            row = self.board_size
+            col = 0
+        else:
+            row = flat_action // self.board_size
+            col = flat_action % self.board_size
+
+        action = torch.tensor([row, col])
         return action, log_prob
 
 def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> torch.Tensor:

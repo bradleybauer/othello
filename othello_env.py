@@ -48,7 +48,7 @@ class OthelloEnv(gym.Env):
         board_size = othello.BOARD_SIZE
         total_actions = board_size * board_size + 1
         # Initialize the mask with zeros.
-        mask = np.zeros(total_actions, dtype=np.float32)
+        mask = np.zeros(total_actions, dtype=np.int8)
 
         legal_moves = self.game.get_legal_actions(self.game.player)
 
@@ -59,7 +59,7 @@ class OthelloEnv(gym.Env):
             else:
                 # For NOOP action (row == board_size)
                 index = board_size * board_size
-            mask[index] = 1.0
+            mask[index] = 1
 
         return mask
 

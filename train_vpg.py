@@ -42,14 +42,13 @@ for iteration in range(num_iterations):
 
         while not done:
             start = time.time()
-            state = torch.from_numpy(state).float().unsqueeze(0)
+            state = torch.from_numpy(state).float()
             action_mask = torch.from_numpy(info['action_mask'])
             action, log_prob = policy_model.select_action(state, action_mask)
             t_policy += time.time() - start
 
             start = time.time()
-            state, reward, terminated, truncated, info = env.step(action.numpy()[0])
-            done = terminated or truncated
+            state, reward, done, _, info = env.step(action.numpy())
             t_env += time.time() - start
 
             episode_log_probs.append(log_prob)
@@ -60,8 +59,7 @@ for iteration in range(num_iterations):
                 start = time.time()
                 op_action_mask = torch.from_numpy(info['action_mask'])
                 op_action = env.sample_random_action(op_action_mask)
-                state, reward, terminated, truncated, info = env.step(op_action)
-                done = terminated or truncated
+                state, reward, done, _, info = env.step(op_action)
                 t_env += time.time() - start
 
                 episode_rewards[-1] -= reward
