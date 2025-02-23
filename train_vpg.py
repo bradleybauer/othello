@@ -3,6 +3,7 @@ import torch
 import torch.optim as optim
 from policy import Policy
 from othello_env import OthelloEnv
+import othello
 
 # A helper function to compute rewards to go
 def rewards_to_go(rewards):
@@ -17,7 +18,7 @@ env = OthelloEnv()
 obs, info = env.reset()
 done = False
 
-policy_model = Policy(env.game.BOARD_SIZE)
+policy_model = Policy(othello.BOARD_SIZE)
 
 optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
 

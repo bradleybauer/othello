@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 import random
 from othello import Othello
+import othello
 
 def check_board_dimensions(game):
     """Verify that the board has the proper dimensions."""
-    assert len(game.board) == Othello.BOARD_SIZE, "Board row count mismatch"
+    assert len(game.board) == othello.BOARD_SIZE, "Board row count mismatch"
     for row in game.board:
-        assert len(row) == Othello.BOARD_SIZE, "Board column count mismatch"
+        assert len(row) == othello.BOARD_SIZE, "Board column count mismatch"
 
 def check_cell_values(game):
     """Verify that each cell contains a valid value."""
-    allowed = {Othello.EMPTY, Othello.WHITE, Othello.BLACK}
+    allowed = {othello.EMPTY, othello.WHITE, othello.BLACK}
     for row in game.board:
         for cell in row:
             assert cell in allowed, "Invalid cell value detected"
@@ -20,10 +21,10 @@ def check_piece_placement(prev_board, game, action, prev_player):
     Verify that when a move is made (not a NOOP), a piece is placed at the designated location,
     and that the cell was empty prior to the move.
     """
-    if action != Othello.NOOP_ACTION:
+    if action != othello.NOOP_ACTION:
         i, j = action
         # Ensure that the cell was empty before the move.
-        assert prev_board[i][j] == Othello.EMPTY, f"Cell ({i},{j}) was not empty before move."
+        assert prev_board[i][j] == othello.EMPTY, f"Cell ({i},{j}) was not empty before move."
         # Ensure that the piece is now correctly placed.
         assert game.board[i][j] == prev_player, "Piece not placed correctly on the board."
 
@@ -32,8 +33,8 @@ def verify_piece_increase(prev_total, game, action):
     Verify that when a piece is played (action is not NOOP), the total number
     of pieces on the board increases by 1.
     """
-    current_total = game.get_score(Othello.WHITE) + game.get_score(Othello.BLACK)
-    if action != Othello.NOOP_ACTION:
+    current_total = game.get_score(othello.WHITE) + game.get_score(othello.BLACK)
+    if action != othello.NOOP_ACTION:
         assert current_total == prev_total + 1, (
             f"Expected total pieces to increase by 1, but increased from {prev_total} to {current_total}"
         )
@@ -47,7 +48,7 @@ def check_flips(prev_board, game, action, prev_player):
     For each direction from the played cell, verify that if there is a valid chain of enemy pieces
     terminated by a piece of prev_player, then those enemy pieces have been flipped.
     """
-    if action == Othello.NOOP_ACTION:
+    if action == othello.NOOP_ACTION:
         return
 
     i, j = action
@@ -96,7 +97,7 @@ def check_noop_termination(prev_skipped, action, done):
     """
     If the action is NOOP and the previous move was also a NOOP, then the game should be terminated.
     """
-    if action == Othello.NOOP_ACTION and prev_skipped:
+    if action == othello.NOOP_ACTION and prev_skipped:
         assert done, "Game did not terminate after consecutive NOOP actions."
 
 def check_done_only_if_double_noop_or_game_board_full(done, action, prev_skipped, board_full):
@@ -105,18 +106,18 @@ def check_done_only_if_double_noop_or_game_board_full(done, action, prev_skipped
     or if the board is full.
     """
     if done:
-        assert board_full or (action == Othello.NOOP_ACTION and prev_skipped), "Game done without double NOOP or full board"
+        assert board_full or (action == othello.NOOP_ACTION and prev_skipped), "Game done without double NOOP or full board"
 
 def check_noop_only_if_no_other_actions(legal_actions):
     """
     If the action is NOOP and the previous move was also a NOOP, then the game should be terminated.
     """
-    if Othello.NOOP_ACTION in legal_actions:
+    if othello.NOOP_ACTION in legal_actions:
         assert len(legal_actions) == 1, "Only possible to play NOOP if there is no other possible move"
 
 def simulate_random_game():
     """
-    Run one random game of Othello with early exit if the game is done.
+    Run one random game of othello with early exit if the game is done.
     Self-consistency checks are performed before and after each move.
     """
     game = Othello()
@@ -128,7 +129,7 @@ def simulate_random_game():
         # Pre-move checks.
         check_board_dimensions(game)
         check_cell_values(game)
-        prev_total = game.get_score(Othello.WHITE) + game.get_score(Othello.BLACK)
+        prev_total = game.get_score(othello.WHITE) + game.get_score(othello.BLACK)
 
         legal_actions = game.get_legal_actions(game.player)
         prev_skipped = game.previous_player_skipped
@@ -143,7 +144,7 @@ def simulate_random_game():
         # Post-move checks.
         check_done_only_if_double_noop_or_game_board_full(done, action, prev_skipped, game.board_is_full())
         check_noop_termination(prev_skipped, action, done)
-        if action != Othello.NOOP_ACTION:
+        if action != othello.NOOP_ACTION:
             check_piece_placement(prev_board, game, action, prev_player)
         verify_piece_increase(prev_total, game, action)
         check_player_switch(prev_player, game)
@@ -157,17 +158,6 @@ def simulate_random_game():
 ###############################################################################
 # Fuzz Tests - deliberately corrupt game states to ensure verification checks work.
 ###############################################################################
-
-def fuzz_test_board_dimensions():
-    game = Othello()
-    # Remove a row to corrupt dimensions.
-    game.board.pop()
-    try:
-        check_board_dimensions(game)
-    except AssertionError as e:
-        pass
-    else:
-        print("Fuzz board dimensions test FAILED: no assertion error detected.")
 
 def fuzz_test_cell_values():
     game = Othello()
@@ -185,7 +175,7 @@ def fuzz_test_piece_placement():
     legal_actions = game.get_legal_actions(game.player)
     action = None
     for a in legal_actions:
-        if a != Othello.NOOP_ACTION:
+        if a != othello.NOOP_ACTION:
             action = a
             break
     if action is None:
@@ -205,11 +195,11 @@ def fuzz_test_piece_placement():
 
 def fuzz_test_piece_increase():
     game = Othello()
-    prev_total = game.get_score(Othello.WHITE) + game.get_score(Othello.BLACK)
+    prev_total = game.get_score(othello.WHITE) + game.get_score(othello.BLACK)
     legal_actions = game.get_legal_actions(game.player)
     action = None
     for a in legal_actions:
-        if a != Othello.NOOP_ACTION:
+        if a != othello.NOOP_ACTION:
             action = a
             break
     if action is None:
@@ -219,7 +209,7 @@ def fuzz_test_piece_increase():
     game.step(action)
     # Now corrupt the board: remove the newly placed piece.
     i, j = action
-    game.board[i][j] = Othello.EMPTY
+    game.board[i][j] = othello.EMPTY
     try:
         verify_piece_increase(prev_total, game, action)
     except AssertionError as e:
@@ -232,7 +222,7 @@ def fuzz_test_flips():
     legal_actions = game.get_legal_actions(game.player)
     action = None
     for a in legal_actions:
-        if a != Othello.NOOP_ACTION:
+        if a != othello.NOOP_ACTION:
             action = a
             break
     if action is None:
@@ -286,7 +276,7 @@ def fuzz_test_player_switch():
     legal_actions = game.get_legal_actions(game.player)
     action = None
     for a in legal_actions:
-        if a != Othello.NOOP_ACTION:
+        if a != othello.NOOP_ACTION:
             action = a
             break
     if action is None:
@@ -306,7 +296,7 @@ def fuzz_test_player_switch():
 def fuzz_test_noop_termination():
     # Simulate a case where action is NOOP, previous move was skipped, but done is False.
     prev_skipped = True
-    action = Othello.NOOP_ACTION
+    action = othello.NOOP_ACTION
     done = False
     try:
         check_noop_termination(prev_skipped, action, done)
@@ -328,7 +318,6 @@ if __name__ == "__main__":
             print(f"Game {game_num} failed consistency check: {e}")
             break
 
-    fuzz_test_board_dimensions()
     fuzz_test_cell_values()
     fuzz_test_piece_placement()
     fuzz_test_piece_increase()

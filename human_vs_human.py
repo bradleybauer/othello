@@ -1,7 +1,7 @@
 import random
 from policy import Policy
 from othello_env import OthelloEnv  # Assumes the environment is defined in othello_env.py
-from othello import Othello         # To access Othello.WHITE, Othello.BLACK, etc.
+import othello
 import torch
 
 def main():
@@ -12,7 +12,7 @@ def main():
     while not done:
         # Identify the current player.
         current_player = env.game.player
-        player_name = "White" if current_player == Othello.WHITE else "Black"
+        player_name = "White" if current_player == othello.WHITE else "Black"
         print(f"\n{player_name}'s turn.")
 
         p = Policy(env.board_size)
@@ -21,9 +21,9 @@ def main():
         legal_moves = env.game.get_legal_actions(current_player)
         
         # Check if the only legal move is the NOOP action.
-        if legal_moves == [Othello.NOOP_ACTION]:
+        if legal_moves == [othello.NOOP_ACTION]:
             print("No legal moves available. Turn will be skipped.\n")
-            action = Othello.NOOP_ACTION
+            action = othello.NOOP_ACTION
             # Render the current board state.
             env.render()
 
@@ -52,7 +52,7 @@ def main():
                 move_input = input("Enter your move as 'row col': ").strip()
                 try:
                     row, col = map(int, move_input.split())
-                    action = [row, col]
+                    action = (row, col)
                     if action in legal_moves:
                         valid_input = True
                     else:
@@ -69,8 +69,8 @@ def main():
     # Game over; display the final board and score.
     print("Game over!")
     env.render()
-    white_score = env.game.get_score(Othello.WHITE)
-    black_score = env.game.get_score(Othello.BLACK)
+    white_score = env.game.get_score(othello.WHITE)
+    black_score = env.game.get_score(othello.BLACK)
     print(f"\nFinal Score:\n  White: {white_score}\n  Black: {black_score}")
     
     if white_score > black_score:

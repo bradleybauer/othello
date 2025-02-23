@@ -2,11 +2,12 @@ import gym
 from gym import spaces
 import numpy as np
 from othello import Othello
+import othello
 
 class OthelloEnv(gym.Env):
     """
-    OpenAI Gym environment for an Othello (Reversi) game.
-    Assumes that the Othello class maintains the current board state in
+    OpenAI Gym environment for an othello (Reversi) game.
+    Assumes that the othello class maintains the current board state in
     a `board` attribute and the current player in a `current_player` attribute.
     """
     metadata = {"render.modes": ["human"]}
@@ -14,7 +15,7 @@ class OthelloEnv(gym.Env):
     def __init__(self):
         super(OthelloEnv, self).__init__()
         self.game = Othello()
-        self.board_size = Othello.BOARD_SIZE
+        self.board_size = othello.BOARD_SIZE
         
         # Define the action space:
         # The game board is BOARD_SIZE x BOARD_SIZE and the special NOOP_ACTION uses a row index of BOARD_SIZE.
@@ -27,6 +28,10 @@ class OthelloEnv(gym.Env):
                                             shape=(self.board_size, self.board_size),
                                             dtype=np.int8)
 
+    def get_info(self):
+        info = {'action_mask': self.create_flattened_action_mask_for_current_player()}#, 'current_player': self.game.player, 'remaining_pieces_for_current_player'}
+        return info
+
     def reset(self):
         """
         Reset the game to its initial state.
@@ -37,11 +42,10 @@ class OthelloEnv(gym.Env):
         self.game.reset()
         board = self.game.board
 
-        info = {'action_mask': self.create_flattened_action_mask_for_current_player()}
-        return np.array(board, dtype=np.int8), info
+        return np.array(board, dtype=np.int8), self.get_info()
 
     def create_flattened_action_mask_for_current_player(self):
-        board_size = Othello.BOARD_SIZE
+        board_size = othello.BOARD_SIZE
         total_actions = board_size * board_size + 1
         # Initialize the mask with zeros.
         mask = np.zeros(total_actions, dtype=np.float32)
@@ -74,14 +78,14 @@ class OthelloEnv(gym.Env):
         valid_indices = np.flatnonzero(action_mask)
         # Randomly select one valid index.
         chosen_idx = np.random.choice(valid_indices)
-        board_size = Othello.BOARD_SIZE
+        board_size = othello.BOARD_SIZE
         if chosen_idx < board_size * board_size:
             row = chosen_idx // board_size
             col = chosen_idx % board_size
             return [row, col]
         else:
             # This corresponds to the NOOP action.
-            return Othello.NOOP_ACTION
+            return othello.NOOP_ACTION
 
     def step(self, action):
         """
@@ -99,16 +103,14 @@ class OthelloEnv(gym.Env):
         """
         # Convert action to list if it comes as a numpy array.
         if isinstance(action, np.ndarray):
-            action = action.tolist()
+            action = tuple(action.tolist())
 
         # Retrieve the current player from the game instance.
-        # (Assumes the Othello class has a current_player attribute.)
+        # (Assumes the othello class has a current_player attribute.)
         current_player = self.game.player
 
         # Get the legal actions for the current player.
         legal_actions = self.game.get_legal_actions(current_player)
-        # If the provided action is not legal, default to the NOOP action.
-        assert action in legal_actions, "Invalid action: {}. Must be one of: {}".format(action, legal_actions)
 
         # Execute the move; the step method returns True if the game is finished.
         terminated = self.game.step(action)
@@ -120,16 +122,15 @@ class OthelloEnv(gym.Env):
         # Here we set reward=0 for non-terminal states.
         # When the game is terminated, we compute the reward as the score difference.
         if terminated:
-            score_white = self.game.get_score(Othello.WHITE)
-            score_black = self.game.get_score(Othello.BLACK)
+            score_white = self.game.get_score(othello.WHITE)
+            score_black = self.game.get_score(othello.BLACK)
             # reward = score_white - score_black
             reward = 1 if score_white != score_black else 0
         else:
             reward = 0
 
-        info = {'action_mask': self.create_flattened_action_mask_for_current_player()}
         truncated = False
-        return np.array(board, dtype=np.int8), reward, terminated, truncated, info
+        return board, reward, terminated, truncated, self.get_info()
 
     def render(self, mode="human"):
         """
@@ -150,8 +151,8 @@ class OthelloEnv(gym.Env):
         
         # Print each row with its row index
         for idx, row in enumerate(board):
-            row_str = " ".join("W" if cell == Othello.WHITE 
-                            else "B" if cell == Othello.BLACK 
+            row_str = " ".join("W" if cell == othello.WHITE 
+                            else "B" if cell == othello.BLACK 
                             else "." for cell in row)
             print(f"{idx:2d}  {row_str}")
 

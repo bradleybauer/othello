@@ -1,205 +1,177 @@
-from typing import List
+import numpy as np
+from numba import int8, boolean
+from numba.experimental import jitclass
+from numba.typed import List
 
+# Global constants (used inside the jitclass)
+BOARD_SIZE = 8
+BLACK = 1
+WHITE = -1
+EMPTY = 0
+NUM_STARTING_PIECES = 32
+NOOP_ACTION = (BOARD_SIZE, 0)  # a tuple to represent the no–move action
+
+# Specify the types for the jitclass attributes
+spec = [
+    ('board', int8[:, :]),         # 2D NumPy array for the board
+    ('player', int8),              # current player
+    ('previous_player_skipped', boolean),
+    ('black_player_num_pieces', int8),
+    ('white_player_num_pieces', int8)
+]
+
+@jitclass(spec)
 class Othello:
-    """
-    A class representing an Othello (Reversi) game.
-    
-    Attributes:
-        BOARD_SIZE (int): The size of the game board (BOARD_SIZE x BOARD_SIZE).
-        WHITE (int): The identifier for the white player.
-        BLACK (int): The identifier for the black player.
-        EMPTY (int): The value representing an empty cell.
-        NUM_STARTING_PIECES (int): The total number of pieces placed on the board at the start.
-        NOOP_ACTION (List[int]): The action used to indicate a pass turn.
-    """
-    BOARD_SIZE: int = 8
-    BLACK: int = 1
-    WHITE: int = -1
-    EMPTY: int = 0
-    NUM_STARTING_PIECES: int = 32
-    NOOP_ACTION: List[int] = [BOARD_SIZE, 0]
-
-    def __init__(self) -> None:
-        """
-        Initialize a new Othello game instance.
-        
-        Sets up the initial state with an empty board, sets the starting player to WHITE,
-        and initializes piece counters and the previous player move flag.
-        """
-        self.player: int = Othello.BLACK
-        self.board: List[List[int]] = []
-        self.previous_player_skipped: bool = False
-        self.black_player_num_pieces: int = 0
-        self.white_player_num_pieces: int = 0
+    def __init__(self):
+        # Initialize the board as an 8x8 NumPy array
+        self.board = self.get_empty_board()
+        self.player = BLACK
+        self.previous_player_skipped = False
+        self.black_player_num_pieces = NUM_STARTING_PIECES - 2
+        self.white_player_num_pieces = NUM_STARTING_PIECES - 2
         self.reset()
 
-    def reset(self) -> None:
-        """
-        Reset the game to its initial state.
-        
-        This method sets up the initial board configuration with the four starting pieces,
-        resets the current player to WHITE, clears the previous skip flag, and initializes
-        the piece counters for both players.
-        """
+    def reset(self):
+        # Reset the game state
         self.board = self.get_initial_board()
-        self.player = Othello.BLACK
+        self.player = BLACK
         self.previous_player_skipped = False
-        self.black_player_num_pieces = Othello.NUM_STARTING_PIECES - 2
-        self.white_player_num_pieces = Othello.NUM_STARTING_PIECES - 2
+        self.black_player_num_pieces = NUM_STARTING_PIECES - 2
+        self.white_player_num_pieces = NUM_STARTING_PIECES - 2
 
-    def get_initial_board(self) -> List[List[int]]:
-        """
-        Create and return the initial board configuration for Othello.
-        
-        The board is an 8x8 grid with the four central squares initialized:
-        - Two WHITE pieces in the top-left and bottom-right of the center.
-        - Two BLACK pieces in the top-right and bottom-left of the center.
-        
-        Returns:
-            List[List[int]]: The initialized game board.
-        """
-        board: List[List[int]] = self.get_empty_board()
-        mid: int = Othello.BOARD_SIZE // 2
-        board[mid - 1][mid - 1] = Othello.WHITE
-        board[mid][mid] = Othello.WHITE
-        board[mid - 1][mid] = Othello.BLACK
-        board[mid][mid - 1] = Othello.BLACK
+    def get_empty_board(self):
+        # Create an empty board filled with EMPTY
+        return np.full((BOARD_SIZE, BOARD_SIZE), EMPTY, dtype=np.int8)
+
+    def get_initial_board(self):
+        board = self.get_empty_board()
+        mid = BOARD_SIZE // 2
+        board[mid - 1, mid - 1] = WHITE
+        board[mid, mid] = WHITE
+        board[mid - 1, mid] = BLACK
+        board[mid, mid - 1] = BLACK
         return board
 
-    def get_empty_board(self) -> List[List[int]]:
-        """
-        Generate an empty board.
-        
-        Creates an 8x8 board (list of lists) where each cell is initialized to EMPTY.
-        
-        Returns:
-            List[List[int]]: An empty game board.
-        """
-        return [[Othello.EMPTY for _ in range(Othello.BOARD_SIZE)] for _ in range(Othello.BOARD_SIZE)]
+    def get_score(self, which_player):
+        s = 0
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                if self.board[i, j] == which_player:
+                    s += 1
+        return s
 
-    def get_score(self, which_player: int) -> int:
-        """
-        Calculate the current score for a given player.
-        
-        The score is determined by counting the number of cells on the board that match
-        the player's identifier.
-        
-        Args:
-            which_player (int): The player identifier (WHITE or BLACK).
-        
-        Returns:
-            int: The total count of the player's pieces on the board.
-        """
-        return sum(cell == which_player for row in self.board for cell in row)
+    def coordinate_in_bounds(self, i, j):
+        return (i >= 0) and (i < BOARD_SIZE) and (j >= 0) and (j < BOARD_SIZE)
 
-    def get_legal_actions(self, for_player: int) -> List[List[int]]:
-        """
-        Determine all legal actions for the given player.
-        
-        This method scans the board to find empty positions adjacent to the opponent's pieces.
-        It then validates each open position by checking in all eight directions to see if
-        placing a piece there would capture enemy pieces.
-        
-        Args:
-            for_player (int): The player for whom to compute legal moves.
-        
-        Returns:
-            List[List[int]]: A list of legal actions represented by [i, j] coordinates.
-                             If no legal moves are available, returns a list with the NOOP_ACTION.
-        """
-        if self.player == Othello.BLACK and self.black_player_num_pieces == 0:
-            return [Othello.NOOP_ACTION]
-        elif self.player == Othello.WHITE and self.white_player_num_pieces == 0:
-            return [Othello.NOOP_ACTION]
+    def opposite_player(self, player):
+        if player == BLACK:
+            return WHITE
+        else:
+            return BLACK
 
-        open_positions: List[List[int]] = []
-        for i in range(Othello.BOARD_SIZE):
-            for j in range(Othello.BOARD_SIZE):
-                if self.board[i][j] == Othello.EMPTY:
-                    is_available: bool = False
+    def board_is_full(self):
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                if self.board[i, j] == EMPTY:
+                    return False
+        return True
+
+    def get_legal_actions(self, for_player):
+        # Use a typed list to accumulate legal actions (each as a tuple of (i, j))
+        legal_actions = List()
+        # If the player has no remaining pieces, the only move is NOOP_ACTION
+        if for_player == BLACK:
+            if self.black_player_num_pieces == 0:
+                legal_actions.append(NOOP_ACTION)
+                return legal_actions
+        else:
+            if self.white_player_num_pieces == 0:
+                legal_actions.append(NOOP_ACTION)
+                return legal_actions
+
+        # Find open positions that are adjacent to an enemy piece.
+        open_positions = List()
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                if self.board[i, j] == EMPTY:
+                    is_available = False
                     for di in range(-1, 2):
                         for dj in range(-1, 2):
                             if di == 0 and dj == 0:
                                 continue
-                            if self.coordinate_in_bounds(i + di, j + dj):
-                                is_available = self.board[i + di][j + dj] == self.opposite_player(for_player)
-                            if is_available:
-                                break
+                            ni = i + di
+                            nj = j + dj
+                            if self.coordinate_in_bounds(ni, nj):
+                                if self.board[ni, nj] == self.opposite_player(for_player):
+                                    is_available = True
+                                    break
                         if is_available:
                             break
                     if is_available:
-                        open_positions.append([i, j])
+                        open_positions.append((i, j))
 
-        enemy: int = self.opposite_player(for_player)
-        actions: List[List[int]] = []
-        for position in open_positions:
-            i, j = position
-            is_valid_play: bool = False
+        enemy = self.opposite_player(for_player)
+        # Validate each open position by checking in all eight directions.
+        for pos in open_positions:
+            i, j = pos
+            is_valid_play = False
             for di in range(-1, 2):
                 for dj in range(-1, 2):
                     if di == 0 and dj == 0:
                         continue
-                    for k in range(1, Othello.BOARD_SIZE):
-                        ip, jp = i + k * di, j + k * dj
+                    for k in range(1, BOARD_SIZE):
+                        ip = i + k * di
+                        jp = j + k * dj
                         if not self.coordinate_in_bounds(ip, jp):
                             break
-                        if k >= 2 and self.board[ip][jp] == for_player:
+                        if k >= 2 and self.board[ip, jp] == for_player:
                             is_valid_play = True
                             break
-                        if self.board[ip][jp] != enemy:
+                        if self.board[ip, jp] != enemy:
                             break
                     if is_valid_play:
                         break
             if is_valid_play:
-                actions.append([i, j])
-    
-        if len(actions) == 0:
-            actions.append(Othello.NOOP_ACTION)
+                legal_actions.append((i, j))
+        if len(legal_actions) == 0:
+            legal_actions.append(NOOP_ACTION)
+        return legal_actions
 
-        return actions
-
-    def step(self, action: List[int]) -> bool:
-        """
-        Execute a move for the current player.
-        
-        If the action is not a NOOP_ACTION, place the piece on the board,
-        update the player's piece count, and flip the opponent's discs as appropriate.
-        If the action is a NOOP_ACTION and the previous player already skipped,
-        the game is marked as done.
-        
-        Args:
-            action (List[int]): The action to perform represented as [i, j] coordinates.
-        
-        Returns:
-            bool: True if the game has ended (both players skipped consecutively or all positions on the board are filled), False otherwise.
-        """
-        done: bool = False
-        if action != Othello.NOOP_ACTION:
-            if self.player == Othello.BLACK:
+    def step(self, action):
+        done = False
+        # Check if the action is the NOOP_ACTION.
+        if not (action[0] == NOOP_ACTION[0] and action[1] == NOOP_ACTION[1]):
+            if self.player == BLACK:
                 self.black_player_num_pieces -= 1
             else:
                 self.white_player_num_pieces -= 1
 
-            assert self.black_player_num_pieces >= 0 and self.white_player_num_pieces >= 0, "Player piece count cannot be negative. black {}, white {}".format(self.black_player_num_pieces, self.white_player_num_pieces)
+            # (In Numba jitcode, assert-style checks must be done manually.)
+            if self.black_player_num_pieces < 0 or self.white_player_num_pieces < 0:
+                self.black_player_num_pieces = 0
+                self.white_player_num_pieces = 0
 
-            i, j = action
-            self.board[i][j] = self.player
+            i = action[0]
+            j = action[1]
+            self.board[i, j] = self.player
 
-            # Flip enemy discs in all eight directions
+            # Flip enemy discs in all eight directions.
             for di in range(-1, 2):
                 for dj in range(-1, 2):
                     if di == 0 and dj == 0:
                         continue
-                    for k in range(1, Othello.BOARD_SIZE):
-                        ip, jp = i + k * di, j + k * dj
+                    for k in range(1, BOARD_SIZE):
+                        ip = i + k * di
+                        jp = j + k * dj
                         if not self.coordinate_in_bounds(ip, jp):
                             break
-                        if self.board[ip][jp] == Othello.EMPTY:
+                        if self.board[ip, jp] == EMPTY:
                             break
-                        if self.board[ip][jp] == self.player:
+                        if self.board[ip, jp] == self.player:
                             for kp in range(1, k):
-                                ip, jp = i + kp * di, j + kp * dj
-                                self.board[ip][jp] = self.player
+                                ip2 = i + kp * di
+                                jp2 = j + kp * dj
+                                self.board[ip2, jp2] = self.player
                             break
 
             self.previous_player_skipped = False
@@ -213,38 +185,3 @@ class Othello:
 
         self.player = self.opposite_player(self.player)
         return done
-
-    def board_is_full(self) -> bool:
-        """
-        Check if the game board is completely filled.
-        
-        Returns:
-            bool: True if the board is full, False otherwise.
-        """
-        # return if no cell is empty
-        return all(cell != Othello.EMPTY for row in self.board for cell in row)
-
-    def opposite_player(self, player: int) -> int:
-        """
-        Get the opposite player.
-        
-        Args:
-            player (int): The current player (WHITE or BLACK).
-        
-        Returns:
-            int: The opposing player's identifier.
-        """
-        return Othello.WHITE if player == Othello.BLACK else Othello.BLACK
-
-    def coordinate_in_bounds(self, i: int, j: int) -> bool:
-        """
-        Check if a coordinate is within the bounds of the board.
-        
-        Args:
-            i (int): The row index.
-            j (int): The column index.
-        
-        Returns:
-            bool: True if the coordinates are within the board, False otherwise.
-        """
-        return 0 <= i < Othello.BOARD_SIZE and 0 <= j < Othello.BOARD_SIZE
