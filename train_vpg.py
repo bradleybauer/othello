@@ -100,7 +100,7 @@ def main():
     # Saturation parameters: if win percentage is above threshold for these many iterations,
     # add the current policy to the pool.
     saturation_counter = 0
-    saturation_threshold = 20
+    saturation_threshold = 10
     win_threshold = 0.6
 
     # Create a multiprocessing pool using torch.multiprocessing.
@@ -125,14 +125,14 @@ def main():
         policy_model.cpu()
 
         win_percentage = wins / total_rollouts
-        print(f"Iteration {iteration}: Loss = {loss.item():.3f}, Train win% = {win_percentage:.2f}, Policy Pool size = {len(policy_params_pool)}.")
+        print(f"Iteration {iteration}: Loss = {loss.item():.3f}, Train win% = {win_percentage:.3f}, Policy Pool size = {len(policy_params_pool)}.")
 
         if wins > best_num_wins:
             best_num_wins = wins
             torch.save(policy_model.state_dict(), "best_policy_model.pth")
-            print(f"New best model with wins% = {win_percentage:.2f}.")
-            dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
+            print(f"New best model with wins% = {win_percentage:.3f}.")
             with torch.no_grad():
+                dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
                 torch.onnx.export(
                     policy_model,
                     (dummy_state,),
@@ -151,11 +151,21 @@ def main():
         # Add current policy to the pool when performance saturates.
         if saturation_counter >= saturation_threshold:
             if len(policy_params_pool) >= pool_size:
-                # Remove the oldest policy from the pool.
-                policy_params_pool.pop(0)
+                policy_params_pool.pop(random.randint(0, len(policy_params_pool) - 1))
             policy_params_pool.append(copy.deepcopy(policy_model.state_dict()))
             saturation_counter = 0
             print("Current policy added to historical pool.")
+            torch.save(policy_model.state_dict(), "latest_pool_addition.pth")
+            with torch.no_grad():
+                dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
+                torch.onnx.export(
+                    policy_model,
+                    (dummy_state,),
+                    "latest_pool_addition.onnx",
+                    input_names=["state"],
+                    output_names=["logits"],
+                    opset_version=11
+                )
 
     pool.close()
     pool.join()
