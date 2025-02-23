@@ -10,11 +10,10 @@ from othello_env import OthelloEnv
 from policy import Policy
 import torch.multiprocessing as mp
 
-def generate_rollouts(policy_params, lagged_policy_params, num_rollouts):
+def generate_rollouts(policy_params, pool_policy_params, num_rollouts):
     """
     Worker function to generate multiple rollouts.
-    Each worker creates its own environment and policies (current and lagged)
-    and then runs several episodes (rollouts) under torch.no_grad().
+    For each rollout, a random opponent is sampled from the historical pool.
     Returns a list of tuples: (states, actions, masks, final_reward) for each trajectory.
     """
     # Create a unique seed for each worker.
@@ -23,19 +22,18 @@ def generate_rollouts(policy_params, lagged_policy_params, num_rollouts):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # Instantiate and load the lagged (frozen) opponent policy.
-    opponent_policy = Policy(othello.BOARD_SIZE**2)
-    opponent_policy.load_state_dict(lagged_policy_params)
-
-    # Create the environment using the lagged opponent.
-    env = OthelloEnv(opponent=opponent_policy)
-
-    # Instantiate and load the current training policy.
+    # Instantiate the current training policy.
     policy = Policy(othello.BOARD_SIZE**2)
     policy.load_state_dict(policy_params)
 
     rollouts = []
     for _ in range(num_rollouts):
+        # Randomly sample an opponent from the pool for this trajectory.
+        sampled_opponent_params = random.choice(pool_policy_params)
+        opponent_policy = Policy(othello.BOARD_SIZE**2)
+        opponent_policy.load_state_dict(sampled_opponent_params)
+        env = OthelloEnv(opponent=opponent_policy)
+
         states = []
         actions = []
         masks = []
@@ -78,17 +76,22 @@ def main():
     total_rollouts = num_workers * rollouts_per_worker
     best_num_wins = -1
 
-    # Initialize the lagged policy as a copy of the starting policy.
-    lagged_policy_params = copy.deepcopy(policy_model.state_dict())
-    # Counter to track consecutive iterations with high win rate.
+    # Set the maximum size of the historical pool.
+    pool_size = 10
+    # Initialize the pool with the starting policy.
+    policy_params_pool = [copy.deepcopy(policy_model.state_dict())]
+    
+    # Saturation parameters: if win percentage is above threshold for these many iterations,
+    # add the current policy to the pool.
     saturation_counter = 0
-    saturation_threshold = 10  # update lagged policy if win rate is sustained
+    saturation_threshold = 20  # e.g., 10 consecutive iterations.
+    win_threshold = 0.8
 
     # Create a multiprocessing pool using torch.multiprocessing.
     pool = mp.Pool(processes=num_workers)
     for iteration in range(num_iterations):
         args = [
-            (copy.deepcopy(policy_model.state_dict()), lagged_policy_params, rollouts_per_worker)
+            (copy.deepcopy(policy_model.state_dict()), policy_params_pool, rollouts_per_worker)
             for _ in range(num_workers)
         ]
         wins = 0
@@ -128,16 +131,19 @@ def main():
                 )
 
         # Check if win percentage has been high for consecutive iterations.
-        if win_percentage >= 0.8:
+        if win_percentage >= win_threshold:
             saturation_counter += 1
         else:
             saturation_counter = 0
 
-        # Update lagged policy if the win rate has been sustained.
+        # Add current policy to the pool when performance saturates.
         if saturation_counter >= saturation_threshold:
-            lagged_policy_params = copy.deepcopy(policy_model.state_dict())
+            if len(policy_params_pool) >= pool_size:
+                # Remove the oldest policy from the pool.
+                policy_params_pool.pop(0)
+            policy_params_pool.append(copy.deepcopy(policy_model.state_dict()))
             saturation_counter = 0
-            print("Lagged policy updated due to sustained high win rate.")
+            print("Current policy added to historical pool.")
 
     pool.close()
     pool.join()
