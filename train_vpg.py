@@ -1,3 +1,5 @@
+import os
+import time
 import torch
 import torch.optim as optim
 import numpy as np
@@ -15,6 +17,12 @@ def generate_rollouts(policy_params, num_rollouts):
     and then runs several episodes (rollouts) under torch.no_grad().
     Returns a list of tuples: (states, actions, masks, final_reward) for each trajectory.
     """
+    # Combine current time and process ID to generate a unique seed.
+    seed = int(time.time() * 1000) % (2**32 - 1) + os.getpid()
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
     env = OthelloEnv(opponent=RandomPolicy())
     policy = Policy(othello.BOARD_SIZE**2)
     policy.load_state_dict(policy_params)
