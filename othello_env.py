@@ -105,12 +105,9 @@ class OthelloEnv(gym.Env):
         if isinstance(action, np.ndarray):
             action = tuple(action.tolist())
 
-        # Retrieve the current player from the game instance.
-        # (Assumes the othello class has a current_player attribute.)
-        current_player = self.game.player
-
-        # Get the legal actions for the current player.
-        legal_actions = self.game.get_legal_actions(current_player)
+        # current_player = self.game.player
+        # legal_actions = self.game.get_legal_actions(current_player)
+        # assert action in legal_actions, f"Invalid action: {action}. Legal actions: {legal_actions}"
 
         # Execute the move; the step method returns True if the game is finished.
         terminated = self.game.step(action)
