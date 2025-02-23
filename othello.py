@@ -53,28 +53,20 @@ class Othello:
         return board
 
     def get_score(self, which_player):
-        s = 0
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                if self.board[i, j] == which_player:
-                    s += 1
-        return s
+        return np.where(self.board == which_player, 1, 0).sum()
 
     def coordinate_in_bounds(self, i, j):
         return (i >= 0) and (i < BOARD_SIZE) and (j >= 0) and (j < BOARD_SIZE)
 
     def opposite_player(self, player):
-        if player == BLACK:
-            return WHITE
-        else:
-            return BLACK
+        return -player
+        # if player == BLACK:
+        #     return WHITE
+        # else:
+        #     return BLACK
 
     def board_is_full(self):
-        for i in range(BOARD_SIZE):
-            for j in range(BOARD_SIZE):
-                if self.board[i, j] == EMPTY:
-                    return False
-        return True
+        return np.all(self.board != EMPTY)
 
     def get_legal_actions(self, for_player):
         # Use a typed list to accumulate legal actions (each as a tuple of (i, j))

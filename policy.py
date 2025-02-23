@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
 
 class Policy(nn.Module):
     def __init__(self, board_size: int) -> None:
@@ -31,7 +30,7 @@ class Policy(nn.Module):
         x = self.fc3(x)
         return x
 
-    def select_action(self, observation: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def select_action(self, observation: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
         Select an action given an observation and a mask of legal actions.
         
@@ -45,20 +44,19 @@ class Policy(nn.Module):
                 - log_prob (torch.Tensor): Tensor of log probabilities for the sampled actions.
         """
         logits = self.forward(observation)
-
-        # Apply masked softmax to obtain probabilities over actions.
         probs = masked_softmax(logits, mask, dim=1)
-
-        # Create a categorical distribution and sample a flat action index.
         dist = torch.distributions.Categorical(probs)
         if self.training:
             flat_action = dist.sample()
         else:
             flat_action = torch.argmax(dist.probs, dim=-1)
-        flat_action = dist.sample()
-        log_prob = dist.log_prob(flat_action)
-
-        flat_action = flat_action.item()
+        return flat_action
+    
+    def log_probs(self, observation: torch.Tensor, flat_action: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        logits = self.forward(observation)
+        probs = masked_softmax(logits, mask, dim=1)
+        dist = torch.distributions.Categorical(probs)
+        return dist.log_prob(flat_action)
 
         # NOOP action has representation [board_size, 0].
         if flat_action == self.board_size * self.board_size:

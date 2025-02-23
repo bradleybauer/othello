@@ -1,11 +1,11 @@
-import time
 import torch
 import torch.optim as optim
 import numpy as np
 import random
-from policy import Policy
-from othello_env import OthelloEnv
 import othello
+from othello_env import OthelloEnv
+from policy import Policy
+from random_policy import RandomPolicy
 
 # A helper function to compute rewards to go
 def rewards_to_go(rewards):
@@ -27,25 +27,16 @@ def test_policy(model, env, num_episodes=200):
     for _ in range(num_episodes):
         state, info = env.reset()
         done = False
-        episode_reward = 0
         while not done:
             state_tensor = torch.from_numpy(state).float()
             action_mask = torch.from_numpy(info['action_mask'])
             with torch.no_grad():
-                action, _ = model.select_action(state_tensor, action_mask)
-            state, reward, done, _, info = env.step(action.numpy())
-            episode_reward = 1 if reward else episode_reward
+                flat_action = model.select_action(state_tensor, action_mask)
+                action = env.inflate_action(flat_action.item())
+            state, reward, done, _, info = env.step(action)
 
-            # Play against a random policy if the game is not done
-            if not done:
-                action_mask = torch.from_numpy(info['action_mask'])
-                action = env.sample_random_action(action_mask)
-                state, reward, done, _, info = env.step(action)
-
-                # Adjust reward since opponent’s reward affects our outcome
-                episode_reward = 0 if reward else episode_reward
-
-        total_reward += episode_reward
+        win = reward > 0
+        total_reward += win
     model.train()
     return total_reward / num_episodes
 
@@ -55,54 +46,36 @@ def main():
     np.random.seed(seed)
     random.seed(seed)
 
-    env = OthelloEnv()
+    env = OthelloEnv(opponent=RandomPolicy(othello.BOARD_SIZE))
     policy_model = Policy(othello.BOARD_SIZE)
     optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
 
-    num_iterations = 10000
+    num_iterations = 1000
     num_episodes_per_iter = 100
+    # num_episodes_per_worker = 50
+    # num_workers = 16
     best_test_reward = float('-inf')
     best_model_params = None
 
     for iteration in range(num_iterations):
         batch_log_probs = []
         batch_rewards = []
-
-        t_policy = 0
-        t_env = 0
         wins = 0
 
-        # Run a batch of episodes
-        for episode in range(num_episodes_per_iter):
+        for _ in range(num_episodes_per_iter):
             state, info = env.reset()
             done = False
             episode_log_probs = []
             episode_rewards = []
 
             while not done:
-                start = time.time()
                 state_tensor = torch.from_numpy(state).float()
                 action_mask = torch.from_numpy(info['action_mask'])
-                action, log_prob = policy_model.select_action(state_tensor, action_mask)
-                t_policy += time.time() - start
-
-                start = time.time()
-                state, reward, done, _, info = env.step(action.numpy())
-                t_env += time.time() - start
-
-                episode_log_probs.append(log_prob)
+                with torch.no_grad():
+                    flat_action = policy_model.select_action(state_tensor, action_mask)
+                episode_log_probs.append(policy_model.log_probs(state_tensor, flat_action, action_mask))
+                state, reward, done, _, info = env.step(env.inflate_action(flat_action.item()))
                 episode_rewards.append(reward)
-
-                # Play against a random policy if the game is not done
-                if not done:
-                    start = time.time()
-                    op_action_mask = torch.from_numpy(info['action_mask'])
-                    op_action = env.sample_random_action(op_action_mask)
-                    state, reward, done, _, info = env.step(op_action)
-                    t_env += time.time() - start
-
-                    # Adjust reward since opponent’s reward affects our outcome
-                    episode_rewards[-1] -= reward
 
             batch_log_probs.append(torch.stack(episode_log_probs).squeeze(-1))
             batch_rewards.append(torch.tensor(rewards_to_go(episode_rewards), dtype=torch.float))
@@ -119,7 +92,7 @@ def main():
 
         # Determine performance using the deterministic test run.
         avg_test_reward = test_policy(policy_model, env, num_episodes=100)
-        print(f"Iteration {iteration}: Loss = {loss.item():.3f}, Test win% = {avg_test_reward:.3f}, Train win% = {wins/num_episodes_per_iter:.3f}, Time: Policy = {t_policy:.3f}, Env = {t_env:.3f}")
+        print(f"Iteration {iteration}: Loss = {loss.item():.3f}, Test win% = {avg_test_reward:.3f}, Train win% = {wins/num_episodes_per_iter:.3f}")
 
         # Save best model parameters based on deterministic test reward.
         if avg_test_reward > best_test_reward:

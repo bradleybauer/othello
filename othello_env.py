@@ -1,4 +1,5 @@
 import gym
+import torch
 from gym import spaces
 import numpy as np
 from othello import Othello
@@ -12,8 +13,10 @@ class OthelloEnv(gym.Env):
     """
     metadata = {"render.modes": ["human"]}
 
-    def __init__(self):
+    def __init__(self, opponent):
         super(OthelloEnv, self).__init__()
+        self.opponent = opponent
+
         self.game = Othello()
         self.board_size = othello.BOARD_SIZE
         
@@ -62,6 +65,23 @@ class OthelloEnv(gym.Env):
             mask[index] = 1
 
         return mask
+    
+    def inflate_action(self, flat_action):
+        """
+        Convert a flattened action index to a pair of row and column indices.
+        
+        Args:
+            flat_action (int): The flattened action index.
+        
+        Returns:
+            List[int]: The corresponding row and column indices.
+        """
+        board_size = othello.BOARD_SIZE
+        if flat_action == board_size * board_size:
+            return othello.NOOP_ACTION
+        row = flat_action // board_size
+        col = flat_action % board_size
+        return row, col
 
     def sample_random_action(self, action_mask):
         """
@@ -97,7 +117,7 @@ class OthelloEnv(gym.Env):
         Returns:
             observation (np.ndarray): The updated board state.
             reward (int): The reward obtained after the move.
-            terminated (bool): Whether the game has completed.
+            done (bool): Whether the game has completed.
             truncated (bool): Whether the game timed out. (Always False in this environment.)
             info (dict): Additional info (the action_mask that determines the valid moves from the returned state).
         """
@@ -110,24 +130,33 @@ class OthelloEnv(gym.Env):
         # assert action in legal_actions, f"Invalid action: {action}. Legal actions: {legal_actions}"
 
         # Execute the move; the step method returns True if the game is finished.
-        terminated = self.game.step(action)
+        done = self.game.step(action)
 
         # Retrieve the updated board state.
-        board = self.game.board
+        state = self.game.board
+        info = self.get_info()
 
-        # Calculate the reward.
-        # Here we set reward=0 for non-terminal states.
-        # When the game is terminated, we compute the reward as the score difference.
-        if terminated:
+        if done:
             score_white = self.game.get_score(othello.WHITE)
             score_black = self.game.get_score(othello.BLACK)
-            # reward = score_white - score_black
-            reward = 1 if score_white != score_black else 0
-        else:
-            reward = 0
+            reward = 1 if score_white != score_black else 0 # you win or draw
+        else: # step opponent
+            action_mask = info['action_mask']
+            with torch.no_grad():
+                flat_action = self.opponent.select_action(torch.from_numpy(state).float(), torch.from_numpy(action_mask))
+                action = self.inflate_action(flat_action.item())
+            done = self.game.step(action)
+            state = self.game.board
+            info = self.get_info()
+            if done:
+                score_white = self.game.get_score(othello.WHITE)
+                score_black = self.game.get_score(othello.BLACK)
+                reward = -1 if score_white != score_black else 0 # opponent wins or draw
+            else:
+                reward = 0
 
         truncated = False
-        return board, reward, terminated, truncated, self.get_info()
+        return state, reward, done, truncated, info
 
     def render(self, mode="human"):
         """
