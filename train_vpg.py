@@ -7,21 +7,7 @@ from othello_env import OthelloEnv
 from policy import Policy
 from random_policy import RandomPolicy
 
-# A helper function to compute rewards to go
-def rewards_to_go(rewards):
-    togo = []
-    R = 0
-    for r in reversed(rewards):
-        R = r + R
-        togo.insert(0, R)
-    return togo
-
 def test_policy(model, env, num_episodes=200):
-    """
-    Runs the policy in a deterministic manner.
-    Instead of sampling, it uses the model's forward pass to get action probabilities
-    and selects the action with the highest probability.
-    """
     model.eval()
     total_reward = 0.0
     for _ in range(num_episodes):
@@ -51,9 +37,8 @@ def main():
     optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
 
     num_iterations = 1000
-    num_episodes_per_iter = 100
-    # num_episodes_per_worker = 50
-    # num_workers = 16
+    num_workers = 16
+    num_episodes_per_iter = num_workers * 8
     best_test_reward = float('-inf')
     best_model_params = None
 
@@ -66,7 +51,6 @@ def main():
             state, info = env.reset()
             done = False
             episode_log_probs = []
-            episode_rewards = []
 
             while not done:
                 state_tensor = torch.from_numpy(state).float()
@@ -75,11 +59,10 @@ def main():
                     flat_action = policy_model.select_action(state_tensor, action_mask)
                 episode_log_probs.append(policy_model.log_probs(state_tensor, flat_action, action_mask))
                 state, reward, done, _, info = env.step(env.inflate_action(flat_action.item()))
-                episode_rewards.append(reward)
 
             batch_log_probs.append(torch.stack(episode_log_probs).squeeze(-1))
-            batch_rewards.append(torch.tensor(rewards_to_go(episode_rewards), dtype=torch.float))
-            wins += episode_rewards[-1] == 1
+            batch_rewards.append(reward)
+            wins += reward > 0
 
         # Compute policy loss: negative log probability weighted by rewards to go
         loss = 0
