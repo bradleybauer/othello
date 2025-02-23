@@ -13,6 +13,7 @@ class OthelloEnv(gym.Env):
     """
     metadata = {"render.modes": ["human"]}
 
+    # TODO assumes player is BLACK and opponent is WHITE
     def __init__(self, opponent):
         super(OthelloEnv, self).__init__()
         self.opponent = opponent
@@ -143,7 +144,7 @@ class OthelloEnv(gym.Env):
         else: # step opponent
             action_mask = info['action_mask']
             with torch.no_grad():
-                flat_action = self.opponent.select_action(torch.from_numpy(state).float(), torch.from_numpy(action_mask))
+                flat_action = self.opponent.select_action(torch.from_numpy(state).float().reshape(1,-1), torch.from_numpy(action_mask))
                 action = self.inflate_action(flat_action.item())
             done = self.game.step(action)
             state = self.game.board

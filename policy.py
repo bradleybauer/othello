@@ -3,28 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class Policy(nn.Module):
-    def __init__(self, board_size: int) -> None:
+    def __init__(self, input_dim: int) -> None:
         super(Policy, self).__init__()
-        self.board_size: int = board_size
-        input_dim: int = board_size * board_size
-        
-        # Simple MLP architecture.
+        input_dim: int = input_dim
         self.fc1: nn.Linear = nn.Linear(input_dim, 128)
         self.fc2: nn.Linear = nn.Linear(128, 128)
         self.fc3: nn.Linear = nn.Linear(128, input_dim + 1)  # all possible board positions + the NOOP action
     
-    def forward(self, observation: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through the network.
-        
-        Args:
-            observation (torch.Tensor): Input tensor with shape (batch_size, board_size, board_size).
-        
-        Returns:
-            torch.Tensor: The output logits.
-        """
-        # Flatten the board.
-        x = observation.view(1, -1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
@@ -35,7 +21,7 @@ class Policy(nn.Module):
         Select an action given an observation and a mask of legal actions.
         
         Args:
-            observation (torch.Tensor): Tensor with shape (batch_size, board_size, board_size).
+            observation (torch.Tensor): Tensor with shape (batch_size, board_size*board_size).
             mask (torch.Tensor): Binary tensor with shape (batch_size, board_size*board_size+1) indicating legal actions.
         
         Returns:
@@ -57,17 +43,6 @@ class Policy(nn.Module):
         probs = masked_softmax(logits, mask, dim=1)
         dist = torch.distributions.Categorical(probs)
         return dist.log_prob(flat_action)
-
-        # NOOP action has representation [board_size, 0].
-        if flat_action == self.board_size * self.board_size:
-            row = self.board_size
-            col = 0
-        else:
-            row = flat_action // self.board_size
-            col = flat_action % self.board_size
-
-        action = torch.tensor([row, col])
-        return action, log_prob
 
 def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> torch.Tensor:
     """
