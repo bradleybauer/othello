@@ -10,55 +10,71 @@ from othello_env import OthelloEnv
 from policy import Policy
 import torch.multiprocessing as mp
 
-def generate_rollouts(policy_params, pool_policy_params, num_rollouts):
+def generate_experience(policy_params, pool_policy_params, num_rollouts):
     """
-    Worker function to generate multiple rollouts.
+    Worker function to generate experience.
     For each rollout, a random opponent is sampled from the historical pool.
-    Returns a list of tuples: (states, actions, masks, final_reward) for each trajectory.
+    Returns a list of tuples: (states, actions, masks, rewards) for each trajectory.
     """
-    # Create a unique seed for each worker.
-    seed = int(time.time() * 1000) % (2**32 - 1) + os.getpid()
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    with torch.no_grad():
+        # Create a unique seed for each worker.
+        seed = int(time.time() * 1000) % (2**32 - 1) + os.getpid()
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
-    # Instantiate the current training policy.
-    policy = Policy(othello.BOARD_SIZE**2)
-    policy.load_state_dict(policy_params)
-
-    rollouts = []
-    for _ in range(num_rollouts):
-        # Randomly sample an opponent from the pool for this trajectory.
-        sampled_opponent_params = random.choice(pool_policy_params)
-        opponent_policy = Policy(othello.BOARD_SIZE**2)
-        opponent_policy.load_state_dict(sampled_opponent_params)
-        env = OthelloEnv(opponent=opponent_policy)
+        # Instantiate the current training policy.
+        policy = Policy(othello.BOARD_SIZE**2)
+        policy.load_state_dict(policy_params)
 
         states = []
         actions = []
         masks = []
+        rewards = []
+        wins = 0
+        for _ in range(num_rollouts):
+            # Randomly sample an opponent from the pool for this trajectory.
+            sampled_opponent_params = random.choice(pool_policy_params)
+            opponent_policy = Policy(othello.BOARD_SIZE**2)
+            opponent_policy.load_state_dict(sampled_opponent_params)
+            env = OthelloEnv(opponent=opponent_policy)
 
-        state, info = env.reset()
-        done = False
-        while not done:
-            states.append(state)
-            masks.append(info['action_mask'])
-            
-            state_tensor = torch.from_numpy(state).float()
-            action_mask = torch.from_numpy(info['action_mask'])
-            with torch.no_grad():
-                flat_action = policy.select_action(state_tensor.reshape(1, -1), action_mask)
+            rollout_states = []
+            rollout_actions = []
+            rollout_masks = []
+            rollout_rewards = []
 
-            actions.append(flat_action.item())
-            action = env.inflate_action(flat_action.item())
-            state, reward, done, _, info = env.step(action)
+            state, info = env.reset()
+            done = False
+            while not done:
+                state = torch.from_numpy(state).reshape(1, -1).float()
+                mask = torch.from_numpy(info['action_mask'])
 
-        states = np.stack(states).reshape(len(states), -1)
-        actions = np.array(actions)
-        masks = np.stack(masks)
+                rollout_states.append(state)
+                rollout_masks.append(mask)
 
-        rollouts.append((states, actions, masks, reward))
-    return rollouts
+                flat_action = policy.select_action(state, mask)
+
+                rollout_actions.append(flat_action)
+                action = env.inflate_action(flat_action.item())
+                state, reward, done, _, info = env.step(action)
+
+            rollout_states = torch.concatenate(rollout_states, axis=0)
+            rollout_actions = torch.stack(rollout_actions)
+            rollout_masks = torch.stack(rollout_masks)
+            rollout_rewards = torch.ones_like(rollout_actions) * reward
+            wins += 1 if reward > 0 else 0
+
+            states.append(rollout_states)
+            actions.append(rollout_actions)
+            masks.append(rollout_masks)
+            rewards.append(rollout_rewards)
+
+        states = torch.vstack(states)
+        actions = torch.vstack(actions)
+        masks = torch.vstack(masks)
+        rewards = torch.vstack(rewards)
+        return (states, actions, masks, rewards, wins)
 
 def main():
     seed = 42  # You can also use a dynamic seed if desired.
@@ -84,8 +100,8 @@ def main():
     # Saturation parameters: if win percentage is above threshold for these many iterations,
     # add the current policy to the pool.
     saturation_counter = 0
-    saturation_threshold = 20  # e.g., 10 consecutive iterations.
-    win_threshold = 0.8
+    saturation_threshold = 20
+    win_threshold = 0.6
 
     # Create a multiprocessing pool using torch.multiprocessing.
     pool = mp.Pool(processes=num_workers)
@@ -96,16 +112,12 @@ def main():
         ]
         wins = 0
         loss = 0
-        results = pool.starmap(generate_rollouts, args)
+        results = pool.starmap(generate_experience, args)
         policy_model.to(device)
-        for rollout_list in results:
-            for states, actions, masks, final_reward in rollout_list:
-                states_tensor = torch.from_numpy(states).float().to(device)
-                actions_tensor = torch.tensor(actions).to(device)
-                masks_tensor = torch.from_numpy(masks).to(device)
-                log_probs = policy_model.log_probs(states_tensor, actions_tensor, masks_tensor)
-                loss += -torch.mean(log_probs * final_reward)
-                wins += 1 if final_reward > 0 else 0
+        for states, actions, masks, rewards, wins_ in results:
+            log_probs = policy_model.log_probs(states.to(device), actions.to(device), masks.to(device))
+            loss += -torch.mean(log_probs * rewards.to(device))
+            wins += wins_
 
         optimizer.zero_grad()
         loss.backward()
@@ -113,7 +125,7 @@ def main():
         policy_model.cpu()
 
         win_percentage = wins / total_rollouts
-        print(f"Iteration {iteration}: Loss = {loss.item():.3f}, Train win% = {win_percentage:.2f}")
+        print(f"Iteration {iteration}: Loss = {loss.item():.3f}, Train win% = {win_percentage:.2f}, Policy Pool size = {len(policy_params_pool)}.")
 
         if wins > best_num_wins:
             best_num_wins = wins
