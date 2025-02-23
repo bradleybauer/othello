@@ -136,7 +136,7 @@ def main():
                 torch.onnx.export(
                     policy_model,
                     (dummy_state,),
-                    "policy_model.onnx",
+                    "best_policy_model.onnx",
                     input_names=["state"],
                     output_names=["logits"],
                     opset_version=11
