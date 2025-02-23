@@ -13,8 +13,8 @@ class Othello:
         NOOP_ACTION (List[int]): The action used to indicate a pass turn.
     """
     BOARD_SIZE: int = 8
-    WHITE: int = 1
-    BLACK: int = -1
+    BLACK: int = 1
+    WHITE: int = -1
     EMPTY: int = 0
     NUM_STARTING_PIECES: int = 32
     NOOP_ACTION: List[int] = [BOARD_SIZE, 0]
@@ -26,7 +26,7 @@ class Othello:
         Sets up the initial state with an empty board, sets the starting player to WHITE,
         and initializes piece counters and the previous player move flag.
         """
-        self.player: int = Othello.WHITE
+        self.player: int = Othello.BLACK
         self.board: List[List[int]] = []
         self.previous_player_skipped: bool = False
         self.black_player_num_pieces: int = 0
@@ -42,7 +42,7 @@ class Othello:
         the piece counters for both players.
         """
         self.board = self.get_initial_board()
-        self.player = Othello.WHITE
+        self.player = Othello.BLACK
         self.previous_player_skipped = False
         self.black_player_num_pieces = Othello.NUM_STARTING_PIECES - 2
         self.white_player_num_pieces = Othello.NUM_STARTING_PIECES - 2
@@ -107,6 +107,11 @@ class Othello:
             List[List[int]]: A list of legal actions represented by [i, j] coordinates.
                              If no legal moves are available, returns a list with the NOOP_ACTION.
         """
+        if self.player == Othello.BLACK and self.black_player_num_pieces == 0:
+            return [Othello.NOOP_ACTION]
+        elif self.player == Othello.WHITE and self.white_player_num_pieces == 0:
+            return [Othello.NOOP_ACTION]
+
         open_positions: List[List[int]] = []
         for i in range(Othello.BOARD_SIZE):
             for j in range(Othello.BOARD_SIZE):
@@ -174,6 +179,8 @@ class Othello:
                 self.black_player_num_pieces -= 1
             else:
                 self.white_player_num_pieces -= 1
+
+            assert self.black_player_num_pieces >= 0 and self.white_player_num_pieces >= 0, "Player piece count cannot be negative. black {}, white {}".format(self.black_player_num_pieces, self.white_player_num_pieces)
 
             i, j = action
             self.board[i][j] = self.player

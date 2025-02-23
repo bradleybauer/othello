@@ -35,10 +35,7 @@ class OthelloEnv(gym.Env):
             info (dict): Additional info (the action_mask that determines the valid moves from the returned state).
         """
         self.game.reset()
-        # Retrieve the initial board configuration.
-        board = self.game.get_initial_board()
-        # Assume that the game stores its board state in a `board` attribute.
-        self.game.board = board
+        board = self.game.board
 
         info = {'action_mask': self.create_flattened_action_mask_for_current_player()}
         return np.array(board, dtype=np.int8), info
@@ -123,10 +120,10 @@ class OthelloEnv(gym.Env):
         # Here we set reward=0 for non-terminal states.
         # When the game is terminated, we compute the reward as the score difference.
         if terminated:
-            # score_white = self.game.get_score(Othello.WHITE)
-            # score_black = self.game.get_score(Othello.BLACK)
+            score_white = self.game.get_score(Othello.WHITE)
+            score_black = self.game.get_score(Othello.BLACK)
             # reward = score_white - score_black
-            reward = 1
+            reward = 1 if score_white != score_black else 0
         else:
             reward = 0
 
