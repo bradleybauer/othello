@@ -146,11 +146,6 @@ class Othello:
             else:
                 self.white_player_num_pieces -= 1
 
-            # (In Numba jitcode, assert-style checks must be done manually.)
-            if self.black_player_num_pieces < 0 or self.white_player_num_pieces < 0:
-                self.black_player_num_pieces = 0
-                self.white_player_num_pieces = 0
-
             i = action[0]
             j = action[1]
             self.board[i, j] = self.player

@@ -115,6 +115,15 @@ def check_noop_only_if_no_other_actions(legal_actions):
     if othello.NOOP_ACTION in legal_actions:
         assert len(legal_actions) == 1, "Only possible to play NOOP if there is no other possible move"
 
+def check_number_pieces_remaining_is_valid(game: Othello):
+    """
+    Verify that the number of pieces remaining on the board is within the expected range.
+    """
+    black_num_remaining = game.black_player_num_pieces
+    white_num_remaining = game.white_player_num_pieces
+    assert black_num_remaining >= 0 and white_num_remaining >= 0, "Negative number of pieces remaining"
+    assert black_num_remaining + white_num_remaining <= othello.BOARD_SIZE ** 2, "Too many pieces remaining"
+
 def simulate_random_game():
     """
     Run one random game of othello with early exit if the game is done.
@@ -142,6 +151,7 @@ def simulate_random_game():
         done = game.step(action)
 
         # Post-move checks.
+        check_number_pieces_remaining_is_valid(game)
         check_done_only_if_double_noop_or_game_board_full(done, action, prev_skipped, game.board_is_full())
         check_noop_termination(prev_skipped, action, done)
         if action != othello.NOOP_ACTION:
