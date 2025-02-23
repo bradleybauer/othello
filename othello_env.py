@@ -130,12 +130,16 @@ class OthelloEnv(gym.Env):
         # legal_actions = self.game.get_legal_actions(current_player)
         # assert action in legal_actions, f"Invalid action: {action}. Legal actions: {legal_actions}"
 
+        assert(self.game.player == othello.BLACK)
+
         # Execute the move; the step method returns True if the game is finished.
         done = self.game.step(action)
 
         # Retrieve the updated board state.
         state = self.game.board
         info = self.get_info()
+
+        assert(self.game.player == othello.WHITE)
 
         if done:
             score_white = self.game.get_score(othello.WHITE)
@@ -144,7 +148,9 @@ class OthelloEnv(gym.Env):
         else: # step opponent
             action_mask = info['action_mask']
             with torch.no_grad():
-                flat_action = self.opponent.select_action(torch.from_numpy(state).float().reshape(1,-1), torch.from_numpy(action_mask))
+                # the model always plays as BLACK
+                state_tensor = -torch.from_numpy(state).float().reshape(1,-1)
+                flat_action = self.opponent.select_action(state_tensor, torch.from_numpy(action_mask))
                 action = self.inflate_action(flat_action.item())
             done = self.game.step(action)
             state = self.game.board

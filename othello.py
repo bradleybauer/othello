@@ -1,3 +1,4 @@
+import random
 import numpy as np
 from numba import int8, boolean
 from numba.experimental import jitclass
@@ -8,7 +9,7 @@ BOARD_SIZE = 8
 BLACK = 1
 WHITE = -1
 EMPTY = 0
-NUM_STARTING_PIECES = 32
+NUM_STARTING_PIECES = 30
 NOOP_ACTION = (BOARD_SIZE, 0)  # a tuple to represent the no–move action
 
 # Specify the types for the jitclass attributes
@@ -27,8 +28,8 @@ class Othello:
         self.board = self.get_empty_board()
         self.player = BLACK
         self.previous_player_skipped = False
-        self.black_player_num_pieces = NUM_STARTING_PIECES - 2
-        self.white_player_num_pieces = NUM_STARTING_PIECES - 2
+        self.black_player_num_pieces = NUM_STARTING_PIECES
+        self.white_player_num_pieces = NUM_STARTING_PIECES
         self.reset()
 
     def reset(self):
@@ -36,8 +37,8 @@ class Othello:
         self.board = self.get_initial_board()
         self.player = BLACK
         self.previous_player_skipped = False
-        self.black_player_num_pieces = NUM_STARTING_PIECES - 2
-        self.white_player_num_pieces = NUM_STARTING_PIECES - 2
+        self.black_player_num_pieces = NUM_STARTING_PIECES
+        self.white_player_num_pieces = NUM_STARTING_PIECES
 
     def get_empty_board(self):
         # Create an empty board filled with EMPTY
@@ -46,10 +47,17 @@ class Othello:
     def get_initial_board(self):
         board = self.get_empty_board()
         mid = BOARD_SIZE // 2
-        board[mid - 1, mid - 1] = WHITE
-        board[mid, mid] = WHITE
-        board[mid - 1, mid] = BLACK
-        board[mid, mid - 1] = BLACK
+        # randomize the initial board configuration
+        if random.random() < 0.5:
+            board[mid - 1, mid - 1] = WHITE
+            board[mid, mid] = WHITE
+            board[mid - 1, mid] = BLACK
+            board[mid, mid - 1] = BLACK
+        else:
+            board[mid - 1, mid - 1] = BLACK
+            board[mid, mid] = BLACK
+            board[mid - 1, mid] = WHITE
+            board[mid, mid - 1] = WHITE
         return board
 
     def get_score(self, which_player):
