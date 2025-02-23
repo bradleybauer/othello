@@ -51,6 +51,10 @@ class Policy(nn.Module):
 
         # Create a categorical distribution and sample a flat action index.
         dist = torch.distributions.Categorical(probs)
+        if self.training:
+            flat_action = dist.sample()
+        else:
+            flat_action = torch.argmax(dist.probs, dim=-1)
         flat_action = dist.sample()
         log_prob = dist.log_prob(flat_action)
 

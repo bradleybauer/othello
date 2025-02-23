@@ -82,7 +82,7 @@ class OthelloEnv(gym.Env):
         if chosen_idx < board_size * board_size:
             row = chosen_idx // board_size
             col = chosen_idx % board_size
-            return [row, col]
+            return (row, col)
         else:
             # This corresponds to the NOOP action.
             return othello.NOOP_ACTION
