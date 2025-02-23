@@ -59,7 +59,7 @@ def main():
     policy_model = Policy(othello.BOARD_SIZE)
     optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
 
-    num_iterations = 1000
+    num_iterations = 10000
     num_episodes_per_iter = 100
     best_test_reward = float('-inf')
     best_model_params = None
@@ -132,13 +132,12 @@ def main():
     if best_model_params is not None:
         policy_model.load_state_dict(best_model_params)
         # Create dummy inputs for ONNX export (adjust shape/type as needed)
-        dummy_state = torch.randn(othello.BOARD_SIZE).float()
-        dummy_mask = torch.ones(othello.BOARD_SIZE).float()
+        dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
         torch.onnx.export(policy_model,
-                          (dummy_state, dummy_mask),
+                          (dummy_state,),
                           "policy_model.onnx",
-                          input_names=["state", "action_mask"],
-                          output_names=["action", "log_prob"],
+                          input_names=["state"],
+                          output_names=["logits"],
                           opset_version=11)
         print("Model exported to policy_model.onnx")
 
