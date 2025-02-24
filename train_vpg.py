@@ -7,7 +7,8 @@ import numpy as np
 import random
 import othello
 from othello_env import OthelloEnv
-from policy import Policy
+from policy_function import Policy
+from value_function import Value
 import torch.multiprocessing as mp
 
 def generate_experience(policy_params, pool_policy_params, num_rollouts):
@@ -84,7 +85,10 @@ def main():
 
     device = torch.device("cuda")
     policy_model = Policy(othello.BOARD_SIZE**2)
-    optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
+    value_model = Value(othello.BOARD_SIZE**2)
+    value_model.to(device)
+    policy_optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
+    value_optimizer = optim.Adam(value_model.parameters(), lr=1e-3)
 
     num_iterations = 1000
     num_workers = 16
@@ -93,9 +97,9 @@ def main():
     best_num_wins = -1
 
     # Set the maximum size of the historical pool.
-    pool_size = 10
+    pool_size = 30
     # Initialize the pool with the starting policy.
-    policy_params_pool = [copy.deepcopy(policy_model.state_dict())]
+    policy_params_pool = [copy.deepcopy(policy_model.state_dict())]*3
     
     # Saturation parameters: if win percentage is above threshold for these many iterations,
     # add the current policy to the pool.
@@ -111,21 +115,33 @@ def main():
             for _ in range(num_workers)
         ]
         wins = 0
-        loss = 0
+        policy_loss = 0
+        value_loss = 0
         results = pool.starmap(generate_experience, args)
         policy_model.to(device)
         for states, actions, masks, rewards, wins_ in results:
-            log_probs = policy_model.log_probs(states.to(device), actions.to(device), masks.to(device))
-            loss += -torch.mean(log_probs * rewards.to(device))
+            states = states.to(device)
+            rewards = rewards.to(device)
+
+            log_probs = policy_model.log_probs(states, actions.to(device), masks.to(device))
+            value = value_model(states)
+            with torch.no_grad():
+                phi = rewards - value
+            policy_loss += -torch.mean(log_probs * phi)
+            value_loss += torch.mean((value - rewards)**2)
             wins += wins_
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        policy_optimizer.zero_grad()
+        policy_loss.backward()
+        policy_optimizer.step()
         policy_model.cpu()
 
+        value_optimizer.zero_grad()
+        value_loss.backward()
+        value_optimizer.step()
+
         win_percentage = wins / total_rollouts
-        print(f"Iteration {iteration}: Loss = {loss.item():.3f}, Train win% = {win_percentage:.3f}, Policy Pool size = {len(policy_params_pool)}.")
+        print(f"Iteration {iteration}: PLoss = {policy_loss.item():.3f}, VLoss = {value_loss.item():.3f}, Train win% = {win_percentage:.3f}, Policy Pool size = {len(policy_params_pool)}.")
 
         if wins > best_num_wins:
             best_num_wins = wins

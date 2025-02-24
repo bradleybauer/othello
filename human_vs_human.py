@@ -1,5 +1,5 @@
 import random
-from policy import Policy
+from policy_function import Policy
 from othello_env import OthelloEnv  # Assumes the environment is defined in othello_env.py
 import othello
 import torch
