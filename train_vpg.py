@@ -90,22 +90,22 @@ def main():
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
     value_optimizer = optim.Adam(value_model.parameters(), lr=1e-3)
 
-    num_iterations = 1000
+    num_iterations = 3000
     num_workers = 16
     rollouts_per_worker = 1024 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
     best_num_wins = -1
 
     # Set the maximum size of the historical pool.
-    pool_size = 30
+    pool_size = 100
     # Initialize the pool with the starting policy.
     policy_params_pool = [copy.deepcopy(policy_model.state_dict())]*3
     
     # Saturation parameters: if win percentage is above threshold for these many iterations,
     # add the current policy to the pool.
     saturation_counter = 0
-    saturation_threshold = 10
-    win_threshold = 0.6
+    saturation_threshold = 20
+    win_threshold = 0.63
 
     # Create a multiprocessing pool using torch.multiprocessing.
     pool = mp.Pool(processes=num_workers)
@@ -144,9 +144,9 @@ def main():
         print(f"Iteration {iteration}: PLoss = {policy_loss.item():.3f}, VLoss = {value_loss.item():.3f}, Train win% = {win_percentage:.3f}, Policy Pool size = {len(policy_params_pool)}.")
 
         if wins > best_num_wins:
+            print(f"New best model with wins% = {win_percentage:.3f}.")
             best_num_wins = wins
             torch.save(policy_model.state_dict(), "best_policy_model.pth")
-            print(f"New best model with wins% = {win_percentage:.3f}.")
             with torch.no_grad():
                 dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
                 torch.onnx.export(
@@ -157,6 +157,19 @@ def main():
                     output_names=["logits"],
                     opset_version=11
                 )
+            value_model.cpu()
+            torch.save(value_model.state_dict(), "best_value_model.pth")
+            with torch.no_grad():
+                dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
+                torch.onnx.export(
+                    value_model,
+                    (dummy_state,),
+                    "best_value_model.onnx",
+                    input_names=["state"],
+                    output_names=["logits"],
+                    opset_version=11
+                )
+            value_model.to(device)
 
         # Check if win percentage has been high for consecutive iterations.
         if win_percentage >= win_threshold:
@@ -166,11 +179,11 @@ def main():
 
         # Add current policy to the pool when performance saturates.
         if saturation_counter >= saturation_threshold:
+            print("Current policy added to historical pool.")
             if len(policy_params_pool) >= pool_size:
                 policy_params_pool.pop(random.randint(0, len(policy_params_pool) - 1))
             policy_params_pool.append(copy.deepcopy(policy_model.state_dict()))
             saturation_counter = 0
-            print("Current policy added to historical pool.")
             torch.save(policy_model.state_dict(), "latest_pool_addition.pth")
             with torch.no_grad():
                 dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
@@ -182,6 +195,19 @@ def main():
                     output_names=["logits"],
                     opset_version=11
                 )
+            value_model.cpu()
+            torch.save(value_model.state_dict(), "latest_pool_addition_value.pth")
+            with torch.no_grad():
+                dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
+                torch.onnx.export(
+                    value_model,
+                    (dummy_state,),
+                    "latest_pool_addition_value.onnx",
+                    input_names=["state"],
+                    output_names=["value"],
+                    opset_version=11
+                )
+            value_model.to(device)
 
     pool.close()
     pool.join()

@@ -6,7 +6,7 @@ class Policy(nn.Module):
     def __init__(self, input_dim: int) -> None:
         super(Policy, self).__init__()
         input_dim: int = input_dim
-        hidden_dim: int = 512
+        hidden_dim: int = 1024
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, input_dim + 1)  # all possible board positions + the NOOP action
