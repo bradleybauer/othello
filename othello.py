@@ -5,7 +5,7 @@ from numba.experimental import jitclass
 from numba.typed import List
 
 # Global constants (used inside the jitclass)
-BOARD_SIZE = 12
+BOARD_SIZE = 8
 BLACK = 1
 WHITE = -1
 EMPTY = 0

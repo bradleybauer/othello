@@ -89,11 +89,10 @@ def simulate_pair_match(args):
 def evaluate_historical_pool_parallel(pool, num_games=4, K=32, min_elo_threshold=900):
     """
     Run a round-robin tournament among all policies in the pool in parallel.
-    Each pair of policies is evaluated concurrently; the Elo adjustments for all pairs
-    are then aggregated and applied.
-    Policies with Elo below min_elo_threshold are filtered out.
+    Each unique pair is evaluated concurrently; the Elo adjustments are then aggregated and applied.
+    Policies with Elo below min_elo_threshold are removed.
     
-    This function should be run under a no_grad() context.
+    Run this function under a torch.no_grad() context.
     """
     n = len(pool)
     orig_elos = [entry['elo'] for entry in pool]
@@ -111,7 +110,6 @@ def evaluate_historical_pool_parallel(pool, num_games=4, K=32, min_elo_threshold
                 num_games,
                 K
             ))
-    # Create a temporary pool for parallel processing.
     with mp.Pool() as p:
         results = p.map(simulate_pair_match, pair_args)
     for (i, j, delta_i, delta_j) in results:
@@ -178,35 +176,100 @@ def generate_experience(policy_params, pool_policy_params, num_rollouts):
         rewards = torch.vstack(rewards)
         return (states, actions, masks, rewards, wins)
 
-def save_best_model(max_policy):
+# -------------------------------
+# Saving Functions
+# -------------------------------
+
+def save_latest_model(policy_model, value_model):
     """
-    Save the best policy and value function weights to disk,
-    and export them via ONNX.
+    Save the latest training model (policy and value) to separate weight files and ONNX exports.
     """
-    torch.save(max_policy['params'], "best_policy_model.pth")
-    torch.save(max_policy['value_params'], "best_value_model.pth")
+    torch.save(policy_model.state_dict(), "latest_model.pth")
+    torch.save(value_model.state_dict(), "latest_value_model.pth")
     with torch.no_grad():
         dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
-        best_policy_model = Policy(othello.BOARD_SIZE**2)
-        best_policy_model.load_state_dict(max_policy['params'])
+        latest_policy = Policy(othello.BOARD_SIZE**2)
+        latest_policy.load_state_dict(policy_model.state_dict())
         torch.onnx.export(
-            best_policy_model,
+            latest_policy,
             (dummy_state,),
-            "best_policy_model.onnx",
+            "latest_model.onnx",
             input_names=["state"],
             output_names=["logits"],
             opset_version=11
         )
-        best_value_model = Value(othello.BOARD_SIZE**2)
-        best_value_model.load_state_dict(max_policy['value_params'])
+        latest_value = Value(othello.BOARD_SIZE**2)
+        latest_value.load_state_dict(value_model.state_dict())
         torch.onnx.export(
-            best_value_model,
+            latest_value,
             (dummy_state,),
-            "best_value_model.onnx",
+            "latest_value.onnx",
             input_names=["state"],
             output_names=["value"],
             opset_version=11
         )
+
+def save_latest_max_elo_model(max_policy):
+    """
+    Save the latest max Elo model from the pool to separate weight files and ONNX exports.
+    """
+    torch.save(max_policy['params'], "latest_max_elo_model.pth")
+    torch.save(max_policy['value_params'], "latest_max_elo_value_model.pth")
+    with torch.no_grad():
+        dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
+        model = Policy(othello.BOARD_SIZE**2)
+        model.load_state_dict(max_policy['params'])
+        torch.onnx.export(
+            model,
+            (dummy_state,),
+            "latest_max_elo_model.onnx",
+            input_names=["state"],
+            output_names=["logits"],
+            opset_version=11
+        )
+        value = Value(othello.BOARD_SIZE**2)
+        value.load_state_dict(max_policy['value_params'])
+        torch.onnx.export(
+            value,
+            (dummy_state,),
+            "latest_max_elo_value_model.onnx",
+            input_names=["state"],
+            output_names=["value"],
+            opset_version=11
+        )
+
+def save_best_elo_model(max_policy):
+    """
+    Save the best Elo ever seen model to separate weight files and ONNX exports.
+    """
+    torch.save(max_policy['params'], "best_elo_model.pth")
+    torch.save(max_policy['value_params'], "best_elo_value_model.pth")
+    with torch.no_grad():
+        dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
+        model = Policy(othello.BOARD_SIZE**2)
+        model.load_state_dict(max_policy['params'])
+        torch.onnx.export(
+            model,
+            (dummy_state,),
+            "best_elo_model.onnx",
+            input_names=["state"],
+            output_names=["logits"],
+            opset_version=11
+        )
+        value = Value(othello.BOARD_SIZE**2)
+        value.load_state_dict(max_policy['value_params'])
+        torch.onnx.export(
+            value,
+            (dummy_state,),
+            "best_elo_value_model.onnx",
+            input_names=["state"],
+            output_names=["value"],
+            opset_version=11
+        )
+
+# -------------------------------
+# Main Training Loop
+# -------------------------------
 
 def main():
     seed = 42
@@ -223,7 +286,7 @@ def main():
 
     num_iterations = 3000
     num_workers = 16
-    rollouts_per_worker = 128 // num_workers
+    rollouts_per_worker = 512 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
     best_elo = -float('inf')
@@ -248,6 +311,7 @@ def main():
 
     pool = mp.Pool(processes=num_workers)
     for iteration in range(num_iterations):
+        # Run training rollouts in parallel.
         args = [
             (copy.deepcopy(policy_model.state_dict()), policy_params_pool, rollouts_per_worker)
             for _ in range(num_workers)
@@ -282,6 +346,9 @@ def main():
               f"VLoss = {value_loss.item():.3f}, Train win% = {win_percentage:.3f}, "
               f"Pool size = {len(policy_params_pool)}.")
 
+        # Always save the current training model as the latest model.
+        save_latest_model(policy_model, value_model)
+
         if win_percentage >= win_threshold:
             saturation_counter += 1
         else:
@@ -312,10 +379,12 @@ def main():
                 print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
 
             max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
+            # Save the latest max Elo model regardless.
+            save_latest_max_elo_model(max_policy)
             if max_policy['elo'] > best_elo:
                 best_elo = max_policy['elo']
-                print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving weights.")
-                save_best_model(max_policy)
+                print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving best Elo weights.")
+                save_best_elo_model(max_policy)
 
         if iteration % 100 == 0 and len(policy_params_pool) > 1:
             with torch.no_grad():
@@ -324,10 +393,11 @@ def main():
             for entry in policy_params_pool:
                 print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
             max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
+            save_latest_max_elo_model(max_policy)
             if max_policy['elo'] > best_elo:
                 best_elo = max_policy['elo']
-                print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving weights.")
-                save_best_model(max_policy)
+                print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving best Elo weights.")
+                save_best_elo_model(max_policy)
 
     pool.close()
     pool.join()
