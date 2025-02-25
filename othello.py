@@ -5,11 +5,11 @@ from numba.experimental import jitclass
 from numba.typed import List
 
 # Global constants (used inside the jitclass)
-BOARD_SIZE = 8
+BOARD_SIZE = 12
 BLACK = 1
 WHITE = -1
 EMPTY = 0
-NUM_STARTING_PIECES = 30
+NUM_STARTING_PIECES = (BOARD_SIZE**2) // 2 - 2
 NOOP_ACTION = (BOARD_SIZE, 0)  # a tuple to represent the no–move action
 
 # Specify the types for the jitclass attributes

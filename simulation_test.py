@@ -131,7 +131,7 @@ def simulate_random_game():
     """
     game = Othello()
     turn_count = 0
-    max_turns = 64 * 2
+    max_turns = othello.BOARD_SIZE ** 2 * 2
     done = False
 
     while not done and turn_count <= max_turns:
@@ -172,7 +172,7 @@ def simulate_random_game():
 def fuzz_test_cell_values():
     game = Othello()
     # Insert an invalid value.
-    game.board[0][0] = 999
+    game.board[0][0] = 100
     try:
         check_cell_values(game)
     except AssertionError as e:

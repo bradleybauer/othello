@@ -92,7 +92,7 @@ def main():
 
     num_iterations = 3000
     num_workers = 16
-    rollouts_per_worker = 1024 // num_workers
+    rollouts_per_worker = 128 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
     best_num_wins = -1
 
