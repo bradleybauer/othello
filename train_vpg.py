@@ -11,14 +11,107 @@ from policy_function import Policy
 from value_function import Value
 import torch.multiprocessing as mp
 
+# -------------------------------
+# Tournament Evaluation Functions
+# -------------------------------
+
+def play_game(controlled_policy_state, opponent_policy_state):
+    """
+    Simulate one complete game where the controlled policy makes all decisions.
+    The opponent policy is passed into the environment via OthelloEnv(opponent=...).
+    
+    Returns:
+      1 if the controlled agent wins,
+      0 if the controlled agent loses,
+      0.5 in case of a draw.
+    """
+    # Instantiate the controlled policy.
+    controlled_policy = Policy(othello.BOARD_SIZE**2)
+    controlled_policy.load_state_dict(controlled_policy_state)
+    # Instantiate the opponent policy.
+    opponent_policy = Policy(othello.BOARD_SIZE**2)
+    opponent_policy.load_state_dict(opponent_policy_state)
+    
+    # Create the environment with the opponent.
+    env = OthelloEnv(opponent=opponent_policy)
+    state, info = env.reset()
+    done = False
+    while not done:
+        state_tensor = torch.from_numpy(state).reshape(1, -1).float()
+        mask = torch.from_numpy(info['action_mask'])
+        # The controlled policy selects its action.
+        action = controlled_policy.select_action(state_tensor, mask)
+        action_inflated = env.inflate_action(action.item())
+        state, reward, done, _, info = env.step(action_inflated)
+    # Reward is given from the perspective of the controlled agent.
+    if reward > 0:
+        return 1
+    elif reward < 0:
+        return 0
+    else:
+        return 0.5
+
+def simulate_match(policy1_state, policy2_state, num_games=4):
+    """
+    Simulate a match between two policies by playing an equal number of games with:
+    - policy1 as the controlled agent (and policy2 as opponent)
+    - policy2 as the controlled agent (and policy1 as opponent)
+    
+    Returns the win fraction for policy1.
+    """
+    wins = 0.0
+    half_games = num_games // 2
+    # First half: policy1 is controlled, policy2 is the opponent.
+    for _ in range(half_games):
+        result = play_game(policy1_state, policy2_state)
+        wins += result
+    # Second half: policy2 is controlled, policy1 is the opponent.
+    for _ in range(half_games):
+        result = play_game(policy2_state, policy1_state)
+        wins += (1 - result)  # Convert policy2's perspective to policy1's.
+    return wins / num_games
+
+def update_elo(elo1, elo2, score1, K=32):
+    """
+    Update Elo ratings for two policies based on the match result.
+    score1 is 1 for a win by policy1, 0 for a loss, and 0.5 for a draw.
+    """
+    expected1 = 1 / (1 + 10 ** ((elo2 - elo1) / 400))
+    expected2 = 1 - expected1
+    new_elo1 = elo1 + K * (score1 - expected1)
+    new_elo2 = elo2 + K * ((1 - score1) - expected2)
+    return new_elo1, new_elo2
+
+def evaluate_historical_pool(pool, num_games=4, K=32, min_elo_threshold=700):
+    """
+    Conduct a tournament among all policies in the historical pool.
+    Each unique pair plays a match, and Elo ratings are updated accordingly.
+    Policies with Elo below a specified threshold are removed.
+    
+    This function should be run under a no_grad context.
+    """
+    for i in range(len(pool)):
+        for j in range(i + 1, len(pool)):
+            score1 = simulate_match(pool[i]['params'], pool[j]['params'], num_games)
+            elo_i, elo_j = update_elo(pool[i]['elo'], pool[j]['elo'], score1, K)
+            pool[i]['elo'] = elo_i
+            pool[j]['elo'] = elo_j
+    # Filter out policies with low Elo.
+    pool = [entry for entry in pool if entry['elo'] >= min_elo_threshold]
+    return pool
+
+# -------------------------------
+# Experience Generation and Training Functions
+# -------------------------------
+
 def generate_experience(policy_params, pool_policy_params, num_rollouts):
     """
     Worker function to generate experience.
     For each rollout, a random opponent is sampled from the historical pool.
-    Returns a list of tuples: (states, actions, masks, rewards) for each trajectory.
+    Returns a tuple: (states, actions, masks, rewards, wins).
     """
     with torch.no_grad():
-        # Create a unique seed for each worker.
+        # Set up unique seeds.
         seed = int(time.time() * 1000) % (2**32 - 1) + os.getpid()
         random.seed(seed)
         np.random.seed(seed)
@@ -28,38 +121,27 @@ def generate_experience(policy_params, pool_policy_params, num_rollouts):
         policy = Policy(othello.BOARD_SIZE**2)
         policy.load_state_dict(policy_params)
 
-        states = []
-        actions = []
-        masks = []
-        rewards = []
+        states, actions, masks, rewards = [], [], [], []
         wins = 0
         for _ in range(num_rollouts):
-            # Randomly sample an opponent from the pool for this trajectory.
-            sampled_opponent_params = random.choice(pool_policy_params)
+            # Sample an opponent from the pool.
+            sampled_opponent = random.choice(pool_policy_params)
             opponent_policy = Policy(othello.BOARD_SIZE**2)
-            opponent_policy.load_state_dict(sampled_opponent_params)
+            opponent_policy.load_state_dict(sampled_opponent['params'])
             env = OthelloEnv(opponent=opponent_policy)
 
-            rollout_states = []
-            rollout_actions = []
-            rollout_masks = []
-            rollout_rewards = []
-
+            rollout_states, rollout_actions, rollout_masks = [], [], []
             state, info = env.reset()
             done = False
             while not done:
-                state = torch.from_numpy(state).reshape(1, -1).float()
+                state_tensor = torch.from_numpy(state).reshape(1, -1).float()
                 mask = torch.from_numpy(info['action_mask'])
-
-                rollout_states.append(state)
+                rollout_states.append(state_tensor)
                 rollout_masks.append(mask)
-
-                flat_action = policy.select_action(state, mask)
-
+                flat_action = policy.select_action(state_tensor, mask)
                 rollout_actions.append(flat_action)
                 action = env.inflate_action(flat_action.item())
                 state, reward, done, _, info = env.step(action)
-
             rollout_states = torch.concatenate(rollout_states, axis=0)
             rollout_actions = torch.stack(rollout_actions)
             rollout_masks = torch.stack(rollout_masks)
@@ -78,7 +160,7 @@ def generate_experience(policy_params, pool_policy_params, num_rollouts):
         return (states, actions, masks, rewards, wins)
 
 def main():
-    seed = 42  # You can also use a dynamic seed if desired.
+    seed = 42
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -94,20 +176,29 @@ def main():
     num_workers = 16
     rollouts_per_worker = 128 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
-    best_num_wins = -1
 
-    # Set the maximum size of the historical pool.
-    pool_size = 100
-    # Initialize the pool with the starting policy.
-    policy_params_pool = [copy.deepcopy(policy_model.state_dict())]*3
+    # Best Elo seen so far for saving model weights.
+    best_elo = -float('inf')
     
-    # Saturation parameters: if win percentage is above threshold for these many iterations,
-    # add the current policy to the pool.
+    # Historical pool: each entry includes a unique name, the policy parameters, its value function parameters, and its Elo rating.
+    pool_size = 30
+    initial_elo = 1200
+    policy_params_pool = []
+    initial_policies = 3
+    for i in range(initial_policies):
+        policy_params_pool.append({
+            'name': f"policy_{i}",
+            'params': copy.deepcopy(policy_model.state_dict()),
+            'value_params': copy.deepcopy(value_model.state_dict()),
+            'elo': initial_elo
+        })
+    policy_counter = initial_policies  # Counter to assign unique names.
+
+    # Saturation criteria for adding the current policy to the pool.
     saturation_counter = 0
     saturation_threshold = 20
-    win_threshold = 0.63
+    win_threshold = 0.63  # (Not used anymore for weight saving.)
 
-    # Create a multiprocessing pool using torch.multiprocessing.
     pool = mp.Pool(processes=num_workers)
     for iteration in range(num_iterations):
         args = [
@@ -122,13 +213,12 @@ def main():
         for states, actions, masks, rewards, wins_ in results:
             states = states.to(device)
             rewards = rewards.to(device)
-
             log_probs = policy_model.log_probs(states, actions.to(device), masks.to(device))
             value = value_model(states)
             with torch.no_grad():
                 phi = rewards - value
             policy_loss += -torch.mean(log_probs * phi)
-            value_loss += torch.mean((value - rewards)**2)
+            value_loss += torch.mean((value - rewards) ** 2)
             wins += wins_
 
         policy_optimizer.zero_grad()
@@ -141,73 +231,83 @@ def main():
         value_optimizer.step()
 
         win_percentage = wins / total_rollouts
-        print(f"Iteration {iteration}: PLoss = {policy_loss.item():.3f}, VLoss = {value_loss.item():.3f}, Train win% = {win_percentage:.3f}, Policy Pool size = {len(policy_params_pool)}.")
+        print(f"Iteration {iteration}: PLoss = {policy_loss.item():.3f}, "
+              f"VLoss = {value_loss.item():.3f}, Train win% = {win_percentage:.3f}, "
+              f"Pool size = {len(policy_params_pool)}.")
 
-        if wins > best_num_wins:
-            print(f"New best model with wins% = {win_percentage:.3f}.")
-            best_num_wins = wins
-            torch.save(policy_model.state_dict(), "best_policy_model.pth")
-            with torch.no_grad():
-                dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
-                torch.onnx.export(
-                    policy_model,
-                    (dummy_state,),
-                    "best_policy_model.onnx",
-                    input_names=["state"],
-                    output_names=["logits"],
-                    opset_version=11
-                )
-            value_model.cpu()
-            torch.save(value_model.state_dict(), "best_value_model.pth")
-            with torch.no_grad():
-                dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
-                torch.onnx.export(
-                    value_model,
-                    (dummy_state,),
-                    "best_value_model.onnx",
-                    input_names=["state"],
-                    output_names=["logits"],
-                    opset_version=11
-                )
-            value_model.to(device)
-
-        # Check if win percentage has been high for consecutive iterations.
+        # Update saturation counter based on training performance.
         if win_percentage >= win_threshold:
             saturation_counter += 1
         else:
             saturation_counter = 0
 
-        # Add current policy to the pool when performance saturates.
+        # When performance saturates, add the current policy to the pool.
         if saturation_counter >= saturation_threshold:
-            print("Current policy added to historical pool.")
+            new_policy_name = f"policy_{policy_counter}"
+            policy_counter += 1
+            print(f"Adding current policy as {new_policy_name} to historical pool.")
+            # If pool is too big, remove the policy with the lowest Elo.
             if len(policy_params_pool) >= pool_size:
-                policy_params_pool.pop(random.randint(0, len(policy_params_pool) - 1))
-            policy_params_pool.append(copy.deepcopy(policy_model.state_dict()))
-            saturation_counter = 0
-            torch.save(policy_model.state_dict(), "latest_pool_addition.pth")
-            with torch.no_grad():
-                dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
-                torch.onnx.export(
-                    policy_model,
-                    (dummy_state,),
-                    "latest_pool_addition.onnx",
-                    input_names=["state"],
-                    output_names=["logits"],
-                    opset_version=11
-                )
+                lowest_index = min(range(len(policy_params_pool)), key=lambda i: policy_params_pool[i]['elo'])
+                removed_policy = policy_params_pool.pop(lowest_index)
+                print(f"Removed {removed_policy['name']} with Elo {removed_policy['elo']:.1f}")
             value_model.cpu()
-            torch.save(value_model.state_dict(), "latest_pool_addition_value.pth")
-            with torch.no_grad():
-                dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
-                torch.onnx.export(
-                    value_model,
-                    (dummy_state,),
-                    "latest_pool_addition_value.onnx",
-                    input_names=["state"],
-                    output_names=["value"],
-                    opset_version=11
-                )
+            policy_params_pool.append({
+                'name': new_policy_name,
+                'params': copy.deepcopy(policy_model.state_dict()),
+                'value_params': copy.deepcopy(value_model.state_dict()),
+                'elo': initial_elo
+            })
             value_model.to(device)
+            saturation_counter = 0
+
+            # Run the tournament evaluation under no_grad.
+            with torch.no_grad():
+                policy_params_pool = evaluate_historical_pool(policy_params_pool)
+            print("Historical pool tournament complete. Elo ratings:")
+            for entry in policy_params_pool:
+                print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
+
+            # Check if the newly added policy (or any in the pool) is now the best.
+            max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
+            if max_policy['elo'] > best_elo:
+                best_elo = max_policy['elo']
+                print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving weights.")
+                # Save both policy and corresponding value function weights.
+                torch.save(max_policy['params'], "best_policy_model.pth")
+                torch.save(max_policy['value_params'], "best_value_model.pth")
+                with torch.no_grad():
+                    dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
+                    # Create a new policy model instance and load the best weights.
+                    best_policy_model = Policy(othello.BOARD_SIZE**2)
+                    best_policy_model.load_state_dict(max_policy['params'])
+                    torch.onnx.export(
+                        best_policy_model,
+                        (dummy_state,),
+                        "best_policy_model.onnx",
+                        input_names=["state"],
+                        output_names=["logits"],
+                        opset_version=11
+                    )
+                    # Create a new value model instance and load its best weights.
+                    best_value_model = Value(othello.BOARD_SIZE**2)
+                    best_value_model.load_state_dict(max_policy['value_params'])
+                    torch.onnx.export(
+                        best_value_model,
+                        (dummy_state,),
+                        "best_value_model.onnx",
+                        input_names=["state"],
+                        output_names=["value"],
+                        opset_version=11
+                    )
+
+        # Optionally, periodically run a full tournament on the pool.
+        if iteration % 100 == 0 and len(policy_params_pool) > 1:
+            with torch.no_grad():
+                policy_params_pool = evaluate_historical_pool(policy_params_pool)
+            print("Periodic historical pool tournament complete. Elo ratings:")
+            for entry in policy_params_pool:
+                print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
 
     pool.close()
     pool.join()
