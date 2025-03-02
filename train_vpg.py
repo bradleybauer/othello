@@ -325,11 +325,11 @@ def main():
             states = states.to(device)
             rewards = rewards.to(device)
             log_probs = policy_model.log_probs(states, actions.to(device), masks.to(device))
-            value = value_model(states)
+            values = value_model(states)
             with torch.no_grad():
-                phi = rewards - value
+                phi = rewards - values
             policy_loss += -torch.mean(log_probs * phi)
-            value_loss += torch.mean((value - rewards) ** 2)
+            value_loss += torch.mean((values - rewards) ** 2)
             wins += wins_
 
         policy_optimizer.zero_grad()
