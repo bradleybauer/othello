@@ -40,7 +40,8 @@ class Policy(nn.Module):
         logits = self.forward(observation)
         probs = masked_softmax(logits, mask, dim=1)
         dist = torch.distributions.Categorical(probs)
-        return dist.log_prob(flat_action)
+        assert(flat_action.shape == (probs.shape[0],1))
+        return dist.log_prob(flat_action.squeeze(-1))
 
 def masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> torch.Tensor:
     """
