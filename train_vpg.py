@@ -124,7 +124,28 @@ def evaluate_historical_pool_parallel(pool, num_games=4, K=32, min_elo_threshold
 # Experience Generation and Training Functions
 # -------------------------------
 
-def generate_experience(policy_params, pool_policy_params, num_rollouts):
+def discount_cumsum(x, discount):
+    """
+    magic from rllab for computing discounted cumulative sums of vectors.
+
+    input: 
+        vector x = [x0, 
+                    x1, 
+                    x2]
+
+    output:
+        [x0 + discount * x1 + discount^2 * x2,  
+         x1 + discount * x2,
+         x2]
+    """
+    result = torch.zeros_like(x)
+    running_sum = 0
+    for i in range(len(x) - 1, -1, -1):
+        running_sum = x[i] + discount * running_sum
+        result[i] = running_sum
+    return result
+
+def generate_experience(policy_params, value_params, pool_policy_params, gamma, lam, num_rollouts):
     """
     Worker function to generate experience.
     For each rollout, a random opponent is sampled from the historical pool.
@@ -138,8 +159,10 @@ def generate_experience(policy_params, pool_policy_params, num_rollouts):
 
         policy = Policy(othello.BOARD_SIZE**2)
         policy.load_state_dict(policy_params)
+        value_model = Value(othello.BOARD_SIZE**2)
+        value_model.load_state_dict(value_params)
 
-        states, actions, masks, rewards = [], [], [], []
+        states, actions, masks, returns, advantages = [], [], [], [], []
         wins = 0
         for _ in range(num_rollouts):
             sampled_opponent = random.choice(pool_policy_params)
@@ -147,7 +170,7 @@ def generate_experience(policy_params, pool_policy_params, num_rollouts):
             opponent_policy.load_state_dict(sampled_opponent['params'])
             env = OthelloEnv(opponent=opponent_policy)
 
-            rollout_states, rollout_actions, rollout_masks = [], [], []
+            rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
             state, info = env.reset()
             done = False
             while not done:
@@ -159,22 +182,31 @@ def generate_experience(policy_params, pool_policy_params, num_rollouts):
                 rollout_actions.append(flat_action)
                 action = env.inflate_action(flat_action.item())
                 state, reward, done, _, info = env.step(action)
+                rollout_rewards.append(reward)
             rollout_states = torch.concatenate(rollout_states, axis=0)
             rollout_actions = torch.stack(rollout_actions)
             rollout_masks = torch.stack(rollout_masks)
-            rollout_rewards = torch.ones_like(rollout_actions) * reward
+            rollout_rewards = torch.tensor(rollout_rewards).float()
+            rollout_values = value_model(rollout_states).squeeze()
+            # GAE-Lambda advantage calculation
+            rollout_returns = discount_cumsum(rollout_rewards, gamma)
+            deltas = rollout_rewards + gamma * torch.cat([rollout_values[1:], torch.zeros(1)]) - rollout_values
+            rollout_advantages = discount_cumsum(deltas, gamma * lam)
             wins += 1 if reward > 0 else 0
 
             states.append(rollout_states)
             actions.append(rollout_actions)
             masks.append(rollout_masks)
-            rewards.append(rollout_rewards)
+            advantages.append(rollout_advantages)
+            returns.append(rollout_returns)
 
         states = torch.vstack(states)
         actions = torch.vstack(actions)
         masks = torch.vstack(masks)
-        rewards = torch.vstack(rewards)
-        return (states, actions, masks, rewards, wins)
+        advantages = torch.hstack(advantages)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8) # normalize advantages
+        returns = torch.hstack(returns)
+        return (states, actions, masks, returns, advantages, wins)
 
 # -------------------------------
 # Saving Functions
@@ -284,6 +316,9 @@ def main():
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
     value_optimizer = optim.Adam(value_model.parameters(), lr=1e-3)
 
+    gamma = .99
+    lam = .95
+
     num_iterations = 3000
     num_workers = 16
     rollouts_per_worker = 512 // num_workers
@@ -312,24 +347,22 @@ def main():
     pool = mp.Pool(processes=num_workers)
     for iteration in range(num_iterations):
         # Run training rollouts in parallel.
+        value_model.cpu()
         args = [
-            (copy.deepcopy(policy_model.state_dict()), policy_params_pool, rollouts_per_worker)
+            (copy.deepcopy(policy_model.state_dict()), copy.deepcopy(value_model.state_dict()), policy_params_pool, gamma, lam, rollouts_per_worker)
             for _ in range(num_workers)
         ]
+        value_model.to(device)
         wins = 0
         policy_loss = 0
         value_loss = 0
         results = pool.starmap(generate_experience, args)
         policy_model.to(device)
-        for states, actions, masks, rewards, wins_ in results:
+        for states, actions, masks, returns, advantages, wins_ in results:
             states = states.to(device)
-            rewards = rewards.to(device)
             log_probs = policy_model.log_probs(states, actions.to(device), masks.to(device))
-            values = value_model(states)
-            with torch.no_grad():
-                phi = rewards - values
-            policy_loss += -torch.mean(log_probs * phi)
-            value_loss += torch.mean((values - rewards) ** 2)
+            policy_loss += -torch.mean(log_probs * advantages.to(device))
+            value_loss += torch.mean((value_model(states).squeeze() - returns.to(device)) ** 2)
             wins += wins_
 
         policy_optimizer.zero_grad()
