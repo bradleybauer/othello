@@ -1,3 +1,4 @@
+import random
 import gym
 import torch
 from gym import spaces
@@ -45,6 +46,16 @@ class OthelloEnv(gym.Env):
         """
         self.game.reset()
         board = self.game.board
+
+        # Initial self.game.player is random to simulate that the agent under optimization does not always
+        # go first. (agent is always BLACK)
+        if self.game.player == othello.WHITE:
+            possible_actions = self.game.get_legal_actions(othello.WHITE)
+            action = random.choice(possible_actions)
+            if isinstance(action, np.ndarray):
+                action = tuple(action.tolist())
+            self.game.step(action)
+            board = self.game.board
 
         return np.array(board, dtype=np.int8), self.get_info()
 
@@ -127,8 +138,6 @@ class OthelloEnv(gym.Env):
             action = tuple(action.tolist())
 
         # current_player = self.game.player
-        # legal_actions = self.game.get_legal_actions(current_player)
-        # assert action in legal_actions, f"Invalid action: {action}. Legal actions: {legal_actions}"
 
         assert(self.game.player == othello.BLACK)
 

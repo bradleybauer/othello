@@ -35,7 +35,7 @@ class Othello:
     def reset(self):
         # Reset the game state
         self.board = self.get_initial_board()
-        self.player = BLACK
+        self.player = BLACK if random.random() < 0.5 else WHITE
         self.previous_player_skipped = False
         self.black_player_num_pieces = NUM_STARTING_PIECES
         self.white_player_num_pieces = NUM_STARTING_PIECES

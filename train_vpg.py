@@ -1,6 +1,4 @@
 import copy
-import os
-import time
 import torch
 import torch.optim as optim
 import numpy as np
@@ -79,14 +77,16 @@ def simulate_pair_match(args):
     args is a tuple: (i, j, policy_i_state, policy_j_state, elo_i, elo_j, num_games, K)
     Returns (i, j, delta_i, delta_j) where delta_i and delta_j are Elo adjustments.
     """
-    i, j, policy_i_state, policy_j_state, elo_i, elo_j, num_games, K = args
+    i, j, policy_i_state, policy_j_state, elo_i, elo_j, num_games, K, seed = args
+    random.seed(seed)
+    np.random.seed(seed)
     score1 = simulate_match(policy_i_state, policy_j_state, num_games)
     new_elo_i, new_elo_j = update_elo(elo_i, elo_j, score1, K)
     delta_i = new_elo_i - elo_i
     delta_j = new_elo_j - elo_j
     return (i, j, delta_i, delta_j)
 
-def evaluate_historical_pool_parallel(pool, num_games=4, K=32, min_elo_threshold=900):
+def evaluate_historical_pool_parallel(pool, seed, num_games=4, K=32, min_elo_threshold=10):
     """
     Run a round-robin tournament among all policies in the pool in parallel.
     Each unique pair is evaluated concurrently; the Elo adjustments are then aggregated and applied.
@@ -108,7 +108,8 @@ def evaluate_historical_pool_parallel(pool, num_games=4, K=32, min_elo_threshold
                 orig_elos[i],
                 orig_elos[j],
                 num_games,
-                K
+                K,
+                seed + i * n + j
             ))
     with mp.Pool() as p:
         results = p.map(simulate_pair_match, pair_args)
@@ -145,14 +146,13 @@ def discount_cumsum(x, discount):
         result[i] = running_sum
     return result
 
-def generate_experience(policy_params, value_params, pool_policy_params, gamma, lam, num_rollouts):
+def generate_experience(policy_params, value_params, pool_policy_params, gamma, lam, num_rollouts, seed):
     """
     Worker function to generate experience.
     For each rollout, a random opponent is sampled from the historical pool.
     Returns a tuple: (states, actions, masks, rewards, wins).
     """
     with torch.no_grad():
-        seed = int(time.time() * 1000) % (2**32 - 1) + os.getpid()
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -162,15 +162,15 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         value_model = Value(othello.BOARD_SIZE**2)
         value_model.load_state_dict(value_params)
 
-        states, actions, masks, returns, advantages = [], [], [], [], []
         wins = 0
+        states, actions, masks, returns, advantages = [], [], [], [], []
         for _ in range(num_rollouts):
+            rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
+
             sampled_opponent = random.choice(pool_policy_params)
             opponent_policy = Policy(othello.BOARD_SIZE**2)
             opponent_policy.load_state_dict(sampled_opponent['params'])
             env = OthelloEnv(opponent=opponent_policy)
-
-            rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
             state, info = env.reset()
             done = False
             while not done:
@@ -327,10 +327,10 @@ def main():
     best_elo = -float('inf')
     
     # Historical pool: each entry has a unique name, policy params, value function params, and an Elo.
-    pool_size = 30
+    pool_size = 50000
     initial_elo = 1200
     policy_params_pool = []
-    initial_policies = 3
+    initial_policies = 2
     for i in range(initial_policies):
         policy_params_pool.append({
             'name': f"policy_{i}",
@@ -349,9 +349,10 @@ def main():
         # Run training rollouts in parallel.
         value_model.cpu()
         args = [
-            (copy.deepcopy(policy_model.state_dict()), copy.deepcopy(value_model.state_dict()), policy_params_pool, gamma, lam, rollouts_per_worker)
-            for _ in range(num_workers)
+            (copy.deepcopy(policy_model.state_dict()), copy.deepcopy(value_model.state_dict()), policy_params_pool, gamma, lam, rollouts_per_worker, seed+i)
+            for i in range(num_workers)
         ]
+        seed += num_workers
         value_model.to(device)
         wins = 0
         policy_loss = 0
@@ -361,9 +362,12 @@ def main():
         for states, actions, masks, returns, advantages, wins_ in results:
             states = states.to(device)
             log_probs = policy_model.log_probs(states, actions.to(device), masks.to(device))
-            policy_loss += -torch.mean(log_probs * advantages.to(device))
-            value_loss += torch.mean((value_model(states).squeeze() - returns.to(device)) ** 2)
+            policy_loss += -torch.sum(log_probs * advantages.to(device))
+            value_loss += torch.sum((value_model(states).squeeze() - returns.to(device)) ** 2)
             wins += wins_
+        
+        policy_loss /= total_rollouts
+        value_loss /= total_rollouts
 
         policy_optimizer.zero_grad()
         policy_loss.backward()
@@ -406,7 +410,8 @@ def main():
             saturation_counter = 0
 
             with torch.no_grad():
-                policy_params_pool = evaluate_historical_pool_parallel(policy_params_pool)
+                policy_params_pool = evaluate_historical_pool_parallel(policy_params_pool, seed)
+            seed += len(policy_params_pool)**2
             print("Historical pool tournament complete. Elo ratings:")
             for entry in policy_params_pool:
                 print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
@@ -419,18 +424,19 @@ def main():
                 print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving best Elo weights.")
                 save_best_elo_model(max_policy)
 
-        if iteration % 100 == 0 and len(policy_params_pool) > 1:
-            with torch.no_grad():
-                policy_params_pool = evaluate_historical_pool_parallel(policy_params_pool)
-            print("Periodic historical pool tournament complete. Elo ratings:")
-            for entry in policy_params_pool:
-                print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
-            max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
-            save_latest_max_elo_model(max_policy)
-            if max_policy['elo'] > best_elo:
-                best_elo = max_policy['elo']
-                print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving best Elo weights.")
-                save_best_elo_model(max_policy)
+        # if iteration % 100 == 0 and len(policy_params_pool) > 1:
+        #     with torch.no_grad():
+        #         policy_params_pool = evaluate_historical_pool_parallel(policy_params_pool, seed)
+        #     seed += len(policy_params_pool)**2
+        #     print("Periodic historical pool tournament complete. Elo ratings:")
+        #     for entry in policy_params_pool:
+        #         print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
+        #     max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
+        #     save_latest_max_elo_model(max_policy)
+        #     if max_policy['elo'] > best_elo:
+        #         best_elo = max_policy['elo']
+        #         print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving best Elo weights.")
+        #         save_best_elo_model(max_policy)
 
     pool.close()
     pool.join()
