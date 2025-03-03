@@ -342,7 +342,7 @@ def main():
 
     saturation_counter = 0
     saturation_threshold = 20
-    win_threshold = 0.63  # Not used directly for saving weights.
+    win_threshold = 0.51
 
     pool = mp.Pool(processes=num_workers)
     for iteration in range(num_iterations):
