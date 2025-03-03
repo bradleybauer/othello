@@ -137,8 +137,6 @@ class OthelloEnv(gym.Env):
         if isinstance(action, np.ndarray):
             action = tuple(action.tolist())
 
-        # current_player = self.game.player
-
         assert(self.game.player == othello.BLACK)
 
         # Execute the move; the step method returns True if the game is finished.

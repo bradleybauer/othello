@@ -86,7 +86,7 @@ def simulate_pair_match(args):
     delta_j = new_elo_j - elo_j
     return (i, j, delta_i, delta_j)
 
-def evaluate_historical_pool_parallel(pool, seed, num_games=4, K=32, min_elo_threshold=10):
+def evaluate_historical_pool_parallel(pool, seed, num_games=8, K=32, min_elo_threshold=0):
     """
     Run a round-robin tournament among all policies in the pool in parallel.
     Each unique pair is evaluated concurrently; the Elo adjustments are then aggregated and applied.
@@ -330,7 +330,7 @@ def main():
     pool_size = 50000
     initial_elo = 1200
     policy_params_pool = []
-    initial_policies = 2
+    initial_policies = 5
     for i in range(initial_policies):
         policy_params_pool.append({
             'name': f"policy_{i}",
@@ -393,7 +393,12 @@ def main():
 
         if saturation_counter >= saturation_threshold:
             new_policy_name = f"policy_{policy_counter}"
+            previous_policy_name = f"policy_{policy_counter-1}"
             policy_counter += 1
+            previous_policy_elo = initial_elo
+            for pol in policy_params_pool:
+                if pol['name'] == previous_policy_name:
+                    previous_policy_elo = pol['elo']
             print(f"Adding current policy as {new_policy_name} to historical pool.")
             if len(policy_params_pool) >= pool_size:
                 lowest_index = min(range(len(policy_params_pool)), key=lambda i: policy_params_pool[i]['elo'])
@@ -404,7 +409,7 @@ def main():
                 'name': new_policy_name,
                 'params': copy.deepcopy(policy_model.state_dict()),
                 'value_params': copy.deepcopy(value_model.state_dict()),
-                'elo': initial_elo
+                'elo': previous_policy_elo
             })
             value_model.to(device)
             saturation_counter = 0
@@ -423,20 +428,6 @@ def main():
                 best_elo = max_policy['elo']
                 print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving best Elo weights.")
                 save_best_elo_model(max_policy)
-
-        # if iteration % 100 == 0 and len(policy_params_pool) > 1:
-        #     with torch.no_grad():
-        #         policy_params_pool = evaluate_historical_pool_parallel(policy_params_pool, seed)
-        #     seed += len(policy_params_pool)**2
-        #     print("Periodic historical pool tournament complete. Elo ratings:")
-        #     for entry in policy_params_pool:
-        #         print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
-        #     max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
-        #     save_latest_max_elo_model(max_policy)
-        #     if max_policy['elo'] > best_elo:
-        #         best_elo = max_policy['elo']
-        #         print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving best Elo weights.")
-        #         save_best_elo_model(max_policy)
 
     pool.close()
     pool.join()
