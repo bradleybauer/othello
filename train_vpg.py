@@ -13,6 +13,50 @@ import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 
 # -------------------------------
+# Utility Saving Function (with ONNX Exporting)
+# -------------------------------
+def save_models(policy_state, value_state, base_name: str):
+    """
+    Save the policy and value state dictionaries to PyTorch checkpoints and export them to ONNX.
+    
+    Args:
+        policy_state (dict): State dictionary of the policy model.
+        value_state (dict): State dictionary of the value model.
+        base_name (str): Base file name to use (e.g., "latest" or "latest_max_elo").
+    """
+    # Save PyTorch checkpoints.
+    torch.save(policy_state, f"{base_name}_policy.pth")
+    torch.save(value_state, f"{base_name}_value.pth")
+    
+    # For ONNX export, create new model instances, load the state dicts, and export.
+    dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
+    
+    # Export policy model.
+    policy_model = Policy(othello.BOARD_SIZE**2)
+    policy_model.load_state_dict(policy_state)
+    torch.onnx.export(
+        policy_model,
+        dummy_state,
+        f"{base_name}_policy.onnx",
+        input_names=["state"],
+        output_names=["logits"],
+        opset_version=11
+    )
+    
+    # Export value model.
+    value_model = Value(othello.BOARD_SIZE**2)
+    value_model.load_state_dict(value_state)
+    torch.onnx.export(
+        value_model,
+        dummy_state,
+        f"{base_name}_value.onnx",
+        input_names=["state"],
+        output_names=["value"],
+        opset_version=11
+    )
+
+
+# -------------------------------
 # Tournament Evaluation Functions (Parallel Version)
 # -------------------------------
 
@@ -154,8 +198,8 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-        policy = Policy(othello.BOARD_SIZE**2)
-        policy.load_state_dict(policy_params)
+        policy_model = Policy(othello.BOARD_SIZE**2)
+        policy_model.load_state_dict(policy_params)
         value_model = Value(othello.BOARD_SIZE**2)
         value_model.load_state_dict(value_params)
 
@@ -163,7 +207,6 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         states, actions, masks, returns, advantages = [], [], [], [], []
         for _ in range(num_rollouts):
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
-
             sampled_opponent = random.choice(pool_policy_params)
             opponent_policy = Policy(othello.BOARD_SIZE**2)
             opponent_policy.load_state_dict(sampled_opponent['params'])
@@ -175,7 +218,7 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
                 mask = torch.from_numpy(info['action_mask'])
                 rollout_states.append(state_tensor)
                 rollout_masks.append(mask)
-                flat_action = policy.select_action(state_tensor, mask)
+                flat_action = policy_model.select_action(state_tensor, mask)
                 rollout_actions.append(flat_action)
                 action = env.inflate_action(flat_action.item())
                 state, reward, done, _, info = env.step(action)
@@ -201,109 +244,16 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         actions = torch.vstack(actions)
         masks = torch.vstack(masks)
         advantages = torch.hstack(advantages)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)  # normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         returns = torch.hstack(returns)
         return (states, actions, masks, returns, advantages, wins)
-
-# -------------------------------
-# Saving Functions
-# -------------------------------
-
-def save_latest_model(policy_model, value_model):
-    """
-    Save the latest training model (policy and value) to separate weight files and ONNX exports.
-    """
-    torch.save(policy_model.state_dict(), "latest_model.pth")
-    torch.save(value_model.state_dict(), "latest_value_model.pth")
-    with torch.no_grad():
-        dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
-        latest_policy = Policy(othello.BOARD_SIZE**2)
-        latest_policy.load_state_dict(policy_model.state_dict())
-        torch.onnx.export(
-            latest_policy,
-            (dummy_state,),
-            "latest_model.onnx",
-            input_names=["state"],
-            output_names=["logits"],
-            opset_version=11
-        )
-        latest_value = Value(othello.BOARD_SIZE**2)
-        latest_value.load_state_dict(value_model.state_dict())
-        torch.onnx.export(
-            latest_value,
-            (dummy_state,),
-            "latest_value_model.onnx",
-            input_names=["state"],
-            output_names=["value"],
-            opset_version=11
-        )
-
-def save_latest_max_elo_model(max_policy):
-    """
-    Save the latest max Elo model from the pool to separate weight files and ONNX exports.
-    """
-    torch.save(max_policy['params'], "latest_max_elo_model.pth")
-    torch.save(max_policy['value_params'], "latest_max_elo_value_model.pth")
-    with torch.no_grad():
-        dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
-        model = Policy(othello.BOARD_SIZE**2)
-        model.load_state_dict(max_policy['params'])
-        torch.onnx.export(
-            model,
-            (dummy_state,),
-            "latest_max_elo_model.onnx",
-            input_names=["state"],
-            output_names=["logits"],
-            opset_version=11
-        )
-        value = Value(othello.BOARD_SIZE**2)
-        value.load_state_dict(max_policy['value_params'])
-        torch.onnx.export(
-            value,
-            (dummy_state,),
-            "latest_max_elo_value_model.onnx",
-            input_names=["state"],
-            output_names=["value"],
-            opset_version=11
-        )
-
-def save_best_elo_model(max_policy):
-    """
-    Save the best Elo ever seen model to separate weight files and ONNX exports.
-    """
-    torch.save(max_policy['params'], "best_elo_model.pth")
-    torch.save(max_policy['value_params'], "best_elo_value_model.pth")
-    with torch.no_grad():
-        dummy_state = torch.randn(othello.BOARD_SIZE**2).float()
-        model = Policy(othello.BOARD_SIZE**2)
-        model.load_state_dict(max_policy['params'])
-        torch.onnx.export(
-            model,
-            (dummy_state,),
-            "best_elo_model.onnx",
-            input_names=["state"],
-            output_names=["logits"],
-            opset_version=11
-        )
-        value = Value(othello.BOARD_SIZE**2)
-        value.load_state_dict(max_policy['value_params'])
-        torch.onnx.export(
-            value,
-            (dummy_state,),
-            "best_elo_value_model.onnx",
-            input_names=["state"],
-            output_names=["value"],
-            opset_version=11
-        )
 
 # -------------------------------
 # Main Training Loop
 # -------------------------------
 
 def main():
-    # Create a TensorBoard writer.
     writer = SummaryWriter(log_dir="runs/othello_experiment")
-
     seed = 42
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -311,19 +261,17 @@ def main():
 
     device = torch.device("cuda")
     policy_model = Policy(othello.BOARD_SIZE**2)
-    value_model = Value(othello.BOARD_SIZE**2).to(device)
+    value_model = Value(othello.BOARD_SIZE**2)
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=1e-3)
     value_optimizer = optim.Adam(value_model.parameters(), lr=1e-3)
 
     gamma = 0.99
     lam = 0.95
-
     num_iterations = 3000
     num_workers = 16
     rollouts_per_worker = 512 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
-    best_elo = -float('inf')
     pool_size = 50000
     initial_elo = 1200
     policy_params_pool = []
@@ -343,7 +291,6 @@ def main():
 
     pool = mp.Pool(processes=num_workers)
     for iteration in range(num_iterations):
-        # Run training rollouts in parallel.
         value_model.cpu()
         args = [
             (
@@ -358,27 +305,29 @@ def main():
             for i in range(num_workers)
         ]
         seed += num_workers
-        value_model.to(device)
         wins = 0
         policy_loss = 0
         value_loss = 0
         returns_list = []
+        entropy_total = 0.0
 
-        # Collect experiences from each worker.
         results = pool.starmap(generate_experience, args)
-
         policy_model.to(device)
+        value_model.to(device)
         for states, actions, masks, returns, advantages, wins_ in results:
             states = states.to(device)
+            masks = masks.to(device)
             returns_list.append(returns)
-            log_probs = policy_model.log_probs(states, actions.to(device), masks.to(device))
+            log_probs, entropy = policy_model.log_probs(states, actions.to(device), masks)
             policy_loss += -torch.sum(log_probs * advantages.to(device))
             value_loss += torch.sum((value_model(states).squeeze() - returns.to(device)) ** 2)
             wins += wins_
-
+            entropy_total += entropy
+        
         policy_loss /= total_rollouts
         value_loss /= total_rollouts
         avg_return = torch.cat(returns_list, dim=0).mean()
+        avg_entropy = entropy_total / len(results)
 
         policy_optimizer.zero_grad()
         policy_loss.backward()
@@ -388,32 +337,31 @@ def main():
         value_optimizer.zero_grad()
         value_loss.backward()
         value_optimizer.step()
+        value_model.cpu()
 
         policy_grad_norm = sum(p.grad.data.norm(2).item() ** 2 for p in policy_model.parameters() if p.grad is not None) ** 0.5
         value_grad_norm = sum(p.grad.data.norm(2).item() ** 2 for p in value_model.parameters() if p.grad is not None) ** 0.5
-
         win_percentage = wins / total_rollouts
 
-        # Log scalar metrics.
         writer.add_scalar("Training/PolicyLoss", policy_loss.item(), iteration)
         writer.add_scalar("Training/ValueLoss", value_loss.item(), iteration)
         writer.add_scalar("Training/WinPercentage", win_percentage, iteration)
         writer.add_scalar("Training/AverageReturn", avg_return.item(), iteration)
         writer.add_scalar("Training/PolicyGradNorm", policy_grad_norm, iteration)
         writer.add_scalar("Training/ValueGradNorm", value_grad_norm, iteration)
+        writer.add_scalar("Training/PolicyEntropy", avg_entropy, iteration)
 
         print(f"Iteration {iteration}: PLoss = {policy_loss.item():.3f}, VLoss = {value_loss.item():.3f}, " +
               f"Train win% = {win_percentage:.3f}, Pool size = {len(policy_params_pool)}.")
 
-        # Always save the current training model.
-        save_latest_model(policy_model, value_model)
+        # Save the latest model.
+        save_models(policy_model.state_dict(), value_model.state_dict(), base_name="latest")
 
         if win_percentage >= win_threshold:
             saturation_counter += 1
         else:
             saturation_counter = 0
 
-        # When saturation threshold is reached, add new policy.
         if saturation_counter >= saturation_threshold:
             new_policy_name = f"policy_{policy_counter}"
             previous_policy_name = f"policy_{policy_counter - 1}"
@@ -428,14 +376,12 @@ def main():
                 lowest_index = min(range(len(policy_params_pool)), key=lambda i: policy_params_pool[i]['elo'])
                 removed_policy = policy_params_pool.pop(lowest_index)
                 print(f"Removed {removed_policy['name']} with Elo {removed_policy['elo']:.1f}")
-            value_model.cpu()
             policy_params_pool.append({
                 'name': new_policy_name,
                 'params': copy.deepcopy(policy_model.state_dict()),
                 'value_params': copy.deepcopy(value_model.state_dict()),
                 'elo': previous_policy_elo
             })
-            value_model.to(device)
             saturation_counter = 0
 
             with torch.no_grad():
@@ -445,24 +391,15 @@ def main():
                     seed=seed
                 )
             seed += len(policy_params_pool)
-            # Log the updated Elo for the latest policy.
             writer.add_scalar("Elo/LatestPolicy", policy_params_pool[-1]['elo'], iteration)
-            # --- New Section: Log individual Elo scalars for each policy ---
-            for entry in policy_params_pool:
+            for entry in policy_params_pool[:20]:
                 writer.add_scalar(f"Elo/{entry['name']}", entry['elo'], iteration)
-            # -------------------------------------------------------------------
             print("New policy tournament complete. Updated Elo ratings:")
             for entry in policy_params_pool:
                 print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
-
             max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
-            save_latest_max_elo_model(max_policy)
-            if max_policy['elo'] > best_elo:
-                best_elo = max_policy['elo']
-                print(f"New best policy is {max_policy['name']} with Elo {max_policy['elo']:.1f}. Saving best Elo weights.")
-                save_best_elo_model(max_policy)
+            save_models(max_policy['params'], max_policy['value_params'], base_name="latest_max_elo")
 
-        # --- Log histograms every 100 iterations ---
         if iteration % 100 == 0:
             for name, param in policy_model.named_parameters():
                 writer.add_histogram(f"Policy/Params/{name}", param, iteration)
@@ -472,7 +409,6 @@ def main():
                 writer.add_histogram(f"Value/Params/{name}", param, iteration)
                 if param.grad is not None:
                     writer.add_histogram(f"Value/Grads/{name}", param.grad, iteration)
-        # ---------------------------------------------------------
 
     pool.close()
     pool.join()
