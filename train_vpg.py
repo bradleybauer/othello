@@ -86,39 +86,40 @@ def simulate_pair_match(args):
     delta_j = new_elo_j - elo_j
     return (i, j, delta_i, delta_j)
 
-def evaluate_historical_pool_parallel(pool, seed, num_games=8, K=32, min_elo_threshold=0):
+
+def evaluate_new_policy_parallel(pool, new_policy_index, seed, num_games=8, K=32):
     """
-    Run a round-robin tournament among all policies in the pool in parallel.
-    Each unique pair is evaluated concurrently; the Elo adjustments are then aggregated and applied.
-    Policies with Elo below min_elo_threshold are removed.
-    
-    Run this function under a torch.no_grad() context.
+    Evaluate the new policy (at index new_policy_index) against all previous policies
+    (indices 0 to new_policy_index-1) in parallel. Updates the Elo ratings of both the new policy
+    and the older policies based solely on their head-to-head matches.
     """
-    n = len(pool)
-    orig_elos = [entry['elo'] for entry in pool]
-    adjustments = [0.0] * n
     pair_args = []
-    for i in range(n):
-        for j in range(i+1, n):
-            pair_args.append((
-                i,
-                j,
-                pool[i]['params'],
-                pool[j]['params'],
-                orig_elos[i],
-                orig_elos[j],
-                num_games,
-                K,
-                seed + i * n + j
-            ))
+    # For each old policy, schedule a match with the new policy.
+    for i in range(new_policy_index):
+        pair_args.append((
+            i,
+            new_policy_index,
+            pool[i]['params'],
+            pool[new_policy_index]['params'],
+            pool[i]['elo'],
+            pool[new_policy_index]['elo'],
+            num_games,
+            K,
+            seed + i  # unique seed for each match
+        ))
     with mp.Pool() as p:
         results = p.map(simulate_pair_match, pair_args)
+    
+    # Initialize adjustments for all policies to zero.
+    adjustments = [0.0] * len(pool)
     for (i, j, delta_i, delta_j) in results:
         adjustments[i] += delta_i
         adjustments[j] += delta_j
-    for i in range(n):
-        pool[i]['elo'] = orig_elos[i] + adjustments[i]
-    pool = [entry for entry in pool if entry['elo'] >= min_elo_threshold]
+
+    # Apply the adjustments to the Elo ratings.
+    for i in range(new_policy_index):
+        pool[i]['elo'] += adjustments[i]
+    pool[new_policy_index]['elo'] += adjustments[new_policy_index]
     return pool
 
 # -------------------------------
@@ -326,7 +327,6 @@ def main():
 
     best_elo = -float('inf')
     
-    # Historical pool: each entry has a unique name, policy params, value function params, and an Elo.
     pool_size = 50000
     initial_elo = 1200
     policy_params_pool = []
@@ -414,15 +414,20 @@ def main():
             value_model.to(device)
             saturation_counter = 0
 
+            # Only run matches between the new policy and all previous ones.
             with torch.no_grad():
-                policy_params_pool = evaluate_historical_pool_parallel(policy_params_pool, seed)
-            seed += len(policy_params_pool)**2
-            print("Historical pool tournament complete. Elo ratings:")
+                policy_params_pool = evaluate_new_policy_parallel(
+                    policy_params_pool,
+                    new_policy_index=len(policy_params_pool)-1,
+                    seed=seed
+                )
+            seed += len(policy_params_pool)  # Update seed in a simple way.
+            print("New policy tournament complete. Updated Elo ratings:")
             for entry in policy_params_pool:
                 print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
 
             max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
-            # Save the latest max Elo model regardless.
+            # Save the latest max Elo model.
             save_latest_max_elo_model(max_policy)
             if max_policy['elo'] > best_elo:
                 best_elo = max_policy['elo']
