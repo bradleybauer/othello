@@ -392,8 +392,6 @@ def main():
                 )
             seed += len(policy_params_pool)
             writer.add_scalar("Elo/LatestPolicy", policy_params_pool[-1]['elo'], iteration)
-            for entry in policy_params_pool[:20]:
-                writer.add_scalar(f"Elo/{entry['name']}", entry['elo'], iteration)
             print("New policy tournament complete. Updated Elo ratings:")
             for entry in policy_params_pool:
                 print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
