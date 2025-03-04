@@ -391,8 +391,7 @@ def main():
                     seed=seed
                 )
             seed += len(policy_params_pool)
-            writer.add_scalar("Elo/LatestPolicy", policy_params_pool[-1]['elo'], iteration)
-            print("New policy tournament complete. Updated Elo ratings:")
+            writer.add_scalar("Training/LatestPolicyElo", policy_params_pool[-1]['elo'], iteration)
             for entry in policy_params_pool:
                 print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
             max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
