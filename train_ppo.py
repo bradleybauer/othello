@@ -21,11 +21,6 @@ from torch.utils.tensorboard import SummaryWriter
 def save_models(policy_state, value_state, base_name: str):
     """
     Save the policy and value state dictionaries to PyTorch checkpoints and export them to ONNX.
-    
-    Args:
-        policy_state (dict): State dictionary of the policy model.
-        value_state (dict): State dictionary of the value model.
-        base_name (str): Base file name to use (e.g., "latest" or "latest_max_elo").
     """
     # Save PyTorch checkpoints.
     torch.save(policy_state, f"{base_name}_policy.pth")
@@ -58,32 +53,82 @@ def save_models(policy_state, value_state, base_name: str):
         opset_version=11
     )
 
-def update_elo(elo1, elo2, score1, K=32):
-    """
-    Update Elo ratings for two policies based on the match result.
-    score1 is 1 for a win by policy1, 0 for a loss, and 0.5 for a draw.
-    Returns new elo values: (new_elo1, new_elo2)
-    """
-    expected1 = 1 / (1 + 10 ** ((elo2 - elo1) / 400))
-    expected2 = 1 - expected1
-    new_elo1 = elo1 + K * (score1 - expected1)
-    new_elo2 = elo2 + K * ((1 - score1) - expected2)
-    return new_elo1, new_elo2
+# -------------------------------
+# Elo Management
+# -------------------------------
+class EloManager:
+    def __init__(self, initial_elo=1200):
+        self.current_policy_elo = initial_elo
+        self.pool = []  # list of dict entries for historical policies
+        self.policy_counter = 0  # to assign new names
+
+    def add_initial_policy(self, name, policy, value):
+        """
+        Add a new initial policy to the pool.
+        """
+        entry = {
+            'name': name,
+            'policy_params': copy.deepcopy(policy.state_dict()),
+            'value_params': copy.deepcopy(value.state_dict()),
+            'elo': self.current_policy_elo
+        }
+        self.pool.append(entry)
+        self.policy_counter += 1
+
+    def update_ratings(self, iteration_wins_vector, iteration_draws_vector, iteration_plays_vector):
+        """
+        Simultaneously update Elo ratings for each policy in the pool using the iteration outcomes.
+        For the fixed baseline (assumed to be named 'policy_0'), its Elo remains unchanged.
+        Uses a constant K factor.
+        """
+        base_policy_elo = self.current_policy_elo
+        total_delta = 0.0
+        K = 32  # constant K-factor
+
+        for i, entry in enumerate(self.pool):
+            plays = iteration_plays_vector[i].item()
+            if plays > 0:
+                avg_score = (iteration_wins_vector[i].item() + 0.5 * iteration_draws_vector[i].item()) / plays
+                # Leave the fixed baseline's rating unchanged.
+                if entry['name'] == "policy_0":
+                    new_opp_elo = entry['elo']
+                    delta_current = 0.0
+                else:
+                    expected = 1 / (1 + 10 ** ((entry['elo'] - base_policy_elo) / 400))
+                    delta_current = K * (avg_score - expected)
+                    new_opp_elo = entry['elo'] - K * (avg_score - expected)
+                total_delta += delta_current
+                entry['elo'] = new_opp_elo
+
+        # Update the current policy's Elo as the sum of deltas from all matchups.
+        self.current_policy_elo = base_policy_elo + total_delta
+
+    def add_new_policy(self, policy_model, value_model):
+        """
+        Add the current policy to the historical pool.
+        """
+        new_policy_name = f"policy_{self.policy_counter}"
+        entry = {
+            'name': new_policy_name,
+            'policy_params': copy.deepcopy(policy_model.state_dict()),
+            'value_params': copy.deepcopy(value_model.state_dict()),
+            'elo': self.current_policy_elo
+        }
+        self.pool.append(entry)
+        self.policy_counter += 1
+        print(f"Adding current policy as {new_policy_name} to historical pool with Elo {self.current_policy_elo:.1f}.")
+        self.print_pool_ratings()
+
+    def print_pool_ratings(self):
+        for entry in self.pool:
+            print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
 
 # -------------------------------
-# Experience Generation and Training Functions
+# Other Utility Functions
 # -------------------------------
-
 def discount_cumsum(x, discount):
     """
-    Computes discounted cumulative sums of vectors (from rllab).
-
-    input: 
-        vector x = [x0, x1, x2]
-    output:
-        [x0 + discount * x1 + discount^2 * x2,
-         x1 + discount * x2,
-         x2]
+    Computes discounted cumulative sums of vectors.
     """
     result = torch.zeros_like(x)
     running_sum = 0
@@ -95,11 +140,6 @@ def discount_cumsum(x, discount):
 def generate_experience(policy_params, value_params, pool_policy_params, gamma, lam, num_rollouts, seed):
     """
     Worker function to generate experience.
-    For each rollout, a random opponent is sampled from the historical pool.
-    Now also counts draws and losses.
-    Returns a tuple:
-      (states, actions, masks, returns, advantages, wins, draws, losses,
-       wins_vector, draws_vector, losses_vector, plays_vector)
     """
     with torch.no_grad():
         random.seed(seed)
@@ -122,7 +162,7 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         states, actions, masks, returns, advantages = [], [], [], [], []
         for _ in range(num_rollouts):
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
-            # Sample an opponent by index so that we know its position.
+            # Sample an opponent by index.
             opponent_index = random.randint(0, len(pool_policy_params) - 1)
             sampled_opponent = pool_policy_params[opponent_index]
             opponent_policy = Policy(othello.BOARD_SIZE**2)
@@ -145,7 +185,7 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
             rollout_masks = torch.stack(rollout_masks)
             rollout_rewards = torch.tensor(rollout_rewards).float()
             rollout_values = value_model(rollout_states).squeeze()
-            # GAE-Lambda advantage calculation
+            # Compute returns and advantages.
             rollout_returns = discount_cumsum(rollout_rewards, gamma)
             deltas = rollout_rewards + gamma * torch.cat([rollout_values[1:], torch.zeros(1)]) - rollout_values
             rollout_advantages = discount_cumsum(deltas, gamma * lam)
@@ -189,7 +229,6 @@ def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, mas
 # -------------------------------
 # Main Training Loop
 # -------------------------------
-
 def main():
     writer = SummaryWriter(log_dir="runs/othello_experiment_ppo2")
     seed = 42
@@ -200,13 +239,13 @@ def main():
     device = torch.device("cuda")
     policy_model = Policy(othello.BOARD_SIZE**2)
     value_model = Value(othello.BOARD_SIZE**2)
-    policy_optimizer = optim.Adam(policy_model.parameters(), lr=.0003)
-    value_optimizer = optim.Adam(value_model.parameters(), lr=.0005)
+    policy_optimizer = optim.Adam(policy_model.parameters(), lr=0.0003)
+    value_optimizer = optim.Adam(value_model.parameters(), lr=0.0005)
 
     gamma = 0.99
     lam = 0.95
-    clip_param = .2
-    target_kl = .05
+    clip_param = 0.2
+    target_kl = 0.05
     num_policy_steps = 80
     num_value_steps = 80
 
@@ -215,27 +254,22 @@ def main():
     rollouts_per_worker = 1024 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
+    # Initialize Elo management.
     initial_elo = 1200
-    # The current policy's elo is maintained separately.
-    current_policy_elo = initial_elo
-
-    policy_params_pool = []
-    initial_policies = 5
+    elo_manager = EloManager(initial_elo=initial_elo)
+    # Add initial policies.
+    # Assume policy_0 is our fixed baseline (random) policy.
+    initial_policies = 2
     for i in range(initial_policies):
-        policy_params_pool.append({
-            'name': f"policy_{i}",
-            'policy_params': copy.deepcopy(policy_model.state_dict()),
-            'value_params': copy.deepcopy(value_model.state_dict()),
-            'elo': initial_elo
-        })
-    policy_counter = initial_policies
+        name = f"policy_{i}"
+        elo_manager.add_initial_policy(name, policy_model, value_model)
 
     saturation_counter = 0
     saturation_threshold = 20
     win_threshold = 0.51
 
-    # Initialize accumulators for wins, draws, losses and plays; track current pool size.
-    prev_pool_size = len(policy_params_pool)
+    # Accumulators for historical performance.
+    prev_pool_size = len(elo_manager.pool)
     accum_wins_vector = torch.zeros(prev_pool_size, dtype=int)
     accum_draws_vector = torch.zeros(prev_pool_size, dtype=int)
     accum_losses_vector = torch.zeros(prev_pool_size, dtype=int)
@@ -247,7 +281,7 @@ def main():
             (
                 copy.deepcopy(policy_model.state_dict()),
                 copy.deepcopy(value_model.state_dict()),
-                policy_params_pool,
+                elo_manager.pool,
                 gamma,
                 lam,
                 rollouts_per_worker,
@@ -258,11 +292,11 @@ def main():
         seed += num_workers
 
         states_, actions_, masks_, returns_, advantages_ = [], [], [], [], []
-        # Create iteration-specific accumulators.
-        iteration_wins_vector = torch.zeros(len(policy_params_pool), dtype=int)
-        iteration_draws_vector = torch.zeros(len(policy_params_pool), dtype=int)
-        iteration_losses_vector = torch.zeros(len(policy_params_pool), dtype=int)
-        iteration_plays_vector = torch.zeros(len(policy_params_pool), dtype=int)
+        # Iteration-specific accumulators.
+        iteration_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+        iteration_draws_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+        iteration_losses_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+        iteration_plays_vector = torch.zeros(len(elo_manager.pool), dtype=int)
         wins_total = 0
         draws_total = 0
         losses_total = 0
@@ -297,6 +331,7 @@ def main():
         with torch.no_grad():
             log_probs_old, _ = policy_model.log_probs(states, actions, masks)
 
+        # Update policy using PPO clipping.
         policy_loss = 0
         policy_grad_norm = 0
         for _ in range(num_policy_steps):
@@ -309,6 +344,7 @@ def main():
             policy_loss += new_policy_loss.item()
             policy_grad_norm += sum(p.grad.data.norm(2).item() ** 2 for p in policy_model.parameters() if p.grad is not None) ** 0.5
 
+        # Update value network.
         value_loss = 0
         value_grad_norm = 0
         for _ in range(num_value_steps):
@@ -333,20 +369,20 @@ def main():
         writer.add_scalar("Training/ValueGradNorm", value_grad_norm, iteration)
         writer.add_scalar("Training/PolicyEntropy", mean_policy_entropy, iteration)
 
-        # Reset accumulators if pool size increased.
-        if len(policy_params_pool) != prev_pool_size:
-            accum_wins_vector = torch.zeros(len(policy_params_pool), dtype=int)
-            accum_draws_vector = torch.zeros(len(policy_params_pool), dtype=int)
-            accum_losses_vector = torch.zeros(len(policy_params_pool), dtype=int)
-            accum_plays_vector = torch.zeros(len(policy_params_pool), dtype=int)
-            prev_pool_size = len(policy_params_pool)
-        # Accumulate the iteration counts.
+        # Reset accumulators if pool size changed.
+        if len(elo_manager.pool) != prev_pool_size:
+            accum_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+            accum_draws_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+            accum_losses_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+            accum_plays_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+            prev_pool_size = len(elo_manager.pool)
+        # Accumulate iteration counts.
         accum_wins_vector += iteration_wins_vector
         accum_draws_vector += iteration_draws_vector
         accum_losses_vector += iteration_losses_vector
         accum_plays_vector += iteration_plays_vector
 
-        # Generate the histogram of win fraction.
+        # Plot histogram of win fractions.
         ratios = []
         for i in range(len(accum_wins_vector)):
             plays = accum_plays_vector[i].item()
@@ -357,46 +393,31 @@ def main():
         plt.xlabel('Policy Index')
         plt.ylabel('Win Fraction')
         plt.title('Accumulated Win/Play Ratio for Historical Policies')
-        plt.savefig("wins_histogram.png")  # Overwrite each iteration
+        plt.savefig("wins_histogram.png")
         plt.close()
 
-        # Update Elo ratings using the iteration outcomes.
-        # For each opponent in the pool, if any games were played, compute average score and update Elo.
-        for i in range(len(policy_params_pool)):
-            plays = iteration_plays_vector[i].item()
-            if plays > 0:
-                avg_score = (iteration_wins_vector[i].item() + 0.5 * iteration_draws_vector[i].item()) / plays
-                current_policy_elo, updated_opp_elo = update_elo(current_policy_elo, policy_params_pool[i]['elo'], avg_score)
-                policy_params_pool[i]['elo'] = updated_opp_elo
-
+        # -------------------------------
+        # Elo Update using EloManager
+        # -------------------------------
+        elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
+        writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
         print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, " +
-              f"Train win% = {win_percentage:.3f}, Pool size = {len(policy_params_pool)}, " +
-              f"Current policy Elo: {current_policy_elo:.1f}")
+              f"Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, " +
+              f"Current policy Elo: {elo_manager.current_policy_elo:.1f}")
 
-        writer.add_scalar("Training/PolicyElo", current_policy_elo, iteration)
-
+        # Check for saturation.
         if win_percentage >= win_threshold:
             saturation_counter += 1
         else:
             saturation_counter = 0
 
         if saturation_counter >= saturation_threshold:
+            # Save current models.
             save_models(policy_model.state_dict(), value_model.state_dict(), base_name="latest")
-            new_policy_name = f"policy_{policy_counter}"
-            policy_counter += 1
-            # Use current_policy_elo for the new policy's elo.
-            print(f"Adding current policy as {new_policy_name} to historical pool with Elo {current_policy_elo:.1f}.")
-            policy_params_pool.append({
-                'name': new_policy_name,
-                'policy_params': copy.deepcopy(policy_model.state_dict()),
-                'value_params': copy.deepcopy(value_model.state_dict()),
-                'elo': current_policy_elo
-            })
+            elo_manager.add_new_policy(policy_model, value_model)
             saturation_counter = 0
-
-            for entry in policy_params_pool:
-                print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
-            max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
+            # Save best performing model.
+            max_policy = max(elo_manager.pool, key=lambda entry: entry['elo'])
             save_models(max_policy['policy_params'], max_policy['value_params'], base_name="latest_max_elo")
 
         if iteration % 100 == 0:
