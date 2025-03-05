@@ -77,31 +77,36 @@ class EloManager:
 
     def update_ratings(self, iteration_wins_vector, iteration_draws_vector, iteration_plays_vector):
         """
-        Simultaneously update Elo ratings for each policy in the pool using the iteration outcomes.
-        For the fixed baseline (assumed to be named 'policy_0'), its Elo remains unchanged.
-        Uses a constant K factor.
+        Update Elo ratings for each matchup using standard Elo updates.
+        For each historical policy (except fixed baseline 'policy_0'), update both the historical rating
+        and the current policy's rating based on their head-to-head results.
         """
-        base_policy_elo = self.current_policy_elo
-        total_delta = 0.0
         K = 32  # constant K-factor
+        R_current = self.current_policy_elo
+        total_delta_current = 0.0
 
         for i, entry in enumerate(self.pool):
             plays = iteration_plays_vector[i].item()
             if plays > 0:
-                avg_score = (iteration_wins_vector[i].item() + 0.5 * iteration_draws_vector[i].item()) / plays
-                # Leave the fixed baseline's rating unchanged.
-                if entry['name'] == "policy_0":
-                    new_opp_elo = entry['elo']
-                    delta_current = 0.0
-                else:
-                    expected = 1 / (1 + 10 ** ((entry['elo'] - base_policy_elo) / 400))
-                    delta_current = K * (avg_score - expected)
-                    new_opp_elo = entry['elo'] - K * (avg_score - expected)
-                total_delta += delta_current
-                entry['elo'] = new_opp_elo
+                # Calculate the average score for the current policy against this opponent.
+                s = (iteration_wins_vector[i].item() + 0.5 * iteration_draws_vector[i].item()) / plays
 
-        # Update the current policy's Elo as the sum of deltas from all matchups.
-        self.current_policy_elo = base_policy_elo + total_delta
+                R_opp = entry['elo']
+                # Compute expected scores for both players.
+                E_current = 1 / (1 + 10 ** ((R_opp - R_current) / 400))
+                E_opp = 1 - E_current
+
+                # Compute the deltas for current and opponent.
+                delta_current = K * (s - E_current)
+                delta_opp = K * ((1 - s) - E_opp)
+                total_delta_current += delta_current
+
+                # Update the opponent's rating.
+                if entry['name'] != "policy_0":
+                    entry['elo'] = R_opp + delta_opp
+
+        # Update the current policy's rating based on the cumulative change.
+        self.current_policy_elo = R_current + total_delta_current
 
     def add_new_policy(self, policy_model, value_model):
         """
@@ -257,12 +262,7 @@ def main():
     # Initialize Elo management.
     initial_elo = 1200
     elo_manager = EloManager(initial_elo=initial_elo)
-    # Add initial policies.
-    # Assume policy_0 is our fixed baseline (random) policy.
-    initial_policies = 2
-    for i in range(initial_policies):
-        name = f"policy_{i}"
-        elo_manager.add_initial_policy(name, policy_model, value_model)
+    elo_manager.add_initial_policy("policy_0", policy_model, value_model)
 
     saturation_counter = 0
     saturation_threshold = 20
