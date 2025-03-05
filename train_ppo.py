@@ -1,3 +1,4 @@
+import os
 import copy
 import torch
 import torch.optim as optim
@@ -14,11 +15,56 @@ def save_models(policy_state, value_state, base_name: str):
     torch.save(policy_state, f"{base_name}_policy.pth")
     torch.save(value_state, f"{base_name}_value.pth")
 
+def save_main_state(policy_state, value_state, policy_optimizer_state, value_optimizer_state, base_name: str):
+    torch.save(policy_state, f"{base_name}_policy.pth")
+    torch.save(value_state, f"{base_name}_value.pth")
+    torch.save(policy_optimizer_state, f"{base_name}_policy_opt.pth")
+    torch.save(value_optimizer_state, f"{base_name}_value_opt.pth")
+
+def save_policy_to_dir(entry, pool_dir):
+    """Save a single policy entry (with its policy/value state and Elo) to its own subdirectory."""
+    subdir = os.path.join(pool_dir, entry['name'])
+    os.makedirs(subdir, exist_ok=True)
+    torch.save(entry['policy_params'], os.path.join(subdir, "policy.pth"))
+    torch.save(entry['value_params'], os.path.join(subdir, "value.pth"))
+    meta = {"name": entry["name"], "elo": entry["elo"]}
+    torch.save(meta, os.path.join(subdir, "meta.pth"))
+
+def load_pool_from_dir(pool_dir):
+    """Load previously saved policies from subdirectories of pool_dir."""
+    pool = []
+    if os.path.exists(pool_dir):
+        for folder in os.listdir(pool_dir):
+            subdir = os.path.join(pool_dir, folder)
+            if os.path.isdir(subdir):
+                policy_path = os.path.join(subdir, "policy.pth")
+                value_path = os.path.join(subdir, "value.pth")
+                meta_path = os.path.join(subdir, "meta.pth")
+                if os.path.exists(policy_path) and os.path.exists(value_path) and os.path.exists(meta_path):
+                    policy_params = torch.load(policy_path, map_location="cpu", weights_only=True)
+                    value_params = torch.load(value_path, map_location="cpu", weights_only=True)
+                    meta = torch.load(meta_path)
+                    entry = {
+                        "name": meta["name"],
+                        "policy_params": policy_params,
+                        "value_params": value_params,
+                        "elo": meta["elo"],
+                    }
+                    pool.append(entry)
+    return pool
+
 class EloManager:
-    def __init__(self, initial_elo=1200):
+    def __init__(self, initial_elo=1200, pool_dir="policy_pool"):
         self.current_policy_elo = initial_elo
         self.pool = []
         self.policy_counter = 0
+        self.pool_dir = pool_dir
+        os.makedirs(self.pool_dir, exist_ok=True)
+        loaded_pool = load_pool_from_dir(self.pool_dir)
+        if loaded_pool:
+            self.pool = loaded_pool
+            self.policy_counter = len(loaded_pool)
+            print(f"Loaded {len(loaded_pool)} policies from {self.pool_dir}")
 
     def add_initial_policy(self, name, policy, value):
         entry = {
@@ -29,6 +75,7 @@ class EloManager:
         }
         self.pool.append(entry)
         self.policy_counter += 1
+        save_policy_to_dir(entry, self.pool_dir)
 
     def update_ratings(self, iteration_wins_vector, iteration_draws_vector, iteration_plays_vector):
         K = 32
@@ -57,6 +104,7 @@ class EloManager:
         self.policy_counter += 1
         print(f"Adding current policy as {new_policy_name} to pool with Elo {self.current_policy_elo:.1f}.")
         self.print_pool_ratings()
+        save_policy_to_dir(entry, self.pool_dir)
 
     def print_pool_ratings(self):
         for entry in self.pool:
@@ -92,7 +140,6 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         states, actions, masks, returns, advantages = [], [], [], [], []
         for _ in range(num_rollouts):
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
-            # Sample an opponent by index.
             opponent_index = random.randint(0, len(pool_policy_params) - 1)
             sampled_opponent = pool_policy_params[opponent_index]
             opponent_policy = Policy(othello.BOARD_SIZE**2)
@@ -119,7 +166,6 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
             deltas = rollout_rewards + gamma * torch.cat([rollout_values[1:], torch.zeros(1)]) - rollout_values
             rollout_advantages = discount_cumsum(deltas, gamma * lam)
             
-            # Record outcome for the sampled opponent.
             if reward > 0:
                 wins += 1
                 wins_vector[opponent_index] += 1
@@ -165,8 +211,17 @@ def main():
     device = torch.device("cuda")
     policy_model = Policy(othello.BOARD_SIZE**2)
     value_model = Value(othello.BOARD_SIZE**2)
+
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=0.0003)
     value_optimizer = optim.Adam(value_model.parameters(), lr=0.0005)
+
+    if os.path.exists("latest_policy.pth") and os.path.exists("latest_value.pth"):
+        print("Loading main models from latest_policy.pth and latest_value.pth")
+        policy_model.load_state_dict(torch.load("latest_policy.pth", map_location="cpu", weights_only=True))
+        value_model.load_state_dict(torch.load("latest_value.pth", map_location="cpu", weights_only=True))
+        if os.path.exists("latest_policy_opt.pth") and os.path.exists("latest_value_opt.pth"):
+            policy_optimizer.load_state_dict(torch.load("latest_policy_opt.pth", map_location="cpu"))
+            value_optimizer.load_state_dict(torch.load("latest_value_opt.pth", map_location="cpu"))
 
     gamma = 0.99
     lam = 0.95
@@ -181,8 +236,10 @@ def main():
     total_rollouts = num_workers * rollouts_per_worker
 
     initial_elo = 1200
-    elo_manager = EloManager(initial_elo=initial_elo)
-    elo_manager.add_initial_policy("policy_0", policy_model, value_model)
+    pool_dir = "policy_pool"
+    elo_manager = EloManager(initial_elo=initial_elo, pool_dir=pool_dir)
+    if len(elo_manager.pool) == 0:
+        elo_manager.add_initial_policy("policy_0", policy_model, value_model)
 
     saturation_counter = 0
     saturation_threshold = 20
@@ -316,7 +373,9 @@ def main():
             saturation_counter = 0
 
         if saturation_counter >= saturation_threshold:
-            save_models(policy_model.state_dict(), value_model.state_dict(), base_name="latest")
+            save_main_state(policy_model.state_dict(), value_model.state_dict(),
+                            policy_optimizer.state_dict(), value_optimizer.state_dict(),
+                            base_name="latest")
             elo_manager.add_new_policy(policy_model, value_model)
             saturation_counter = 0
             max_policy = max(elo_manager.pool, key=lambda entry: entry['elo'])
