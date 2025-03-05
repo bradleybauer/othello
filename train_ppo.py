@@ -131,12 +131,8 @@ def simulate_pair_match(args):
     delta_j = new_elo_j - elo_j
     return (i, j, delta_i, delta_j)
 
-def evaluate_new_policy_parallel(pool, new_policy_index, seed, num_games=8, K=32):
-    """
-    Evaluate the new policy (at index new_policy_index) against all previous policies
-    (indices 0 to new_policy_index-1) in parallel. Updates the Elo ratings of both the new policy
-    and the older policies based solely on their head-to-head matches.
-    """
+# Create a persistent evaluation pool at the module or main level.
+def evaluate_new_policy_parallel(pool, new_policy_index, seed, num_games=8, K=32, eval_pool=None):
     pair_args = []
     for i in range(new_policy_index):
         pair_args.append((
@@ -150,8 +146,7 @@ def evaluate_new_policy_parallel(pool, new_policy_index, seed, num_games=8, K=32
             K,
             seed + i
         ))
-    with mp.Pool() as p:
-        results = p.map(simulate_pair_match, pair_args)
+    results = eval_pool.map(simulate_pair_match, pair_args)
     
     adjustments = [0.0] * len(pool)
     for (i, j, delta_i, delta_j) in results:
@@ -162,6 +157,7 @@ def evaluate_new_policy_parallel(pool, new_policy_index, seed, num_games=8, K=32
         pool[i]['elo'] += adjustments[i]
     pool[new_policy_index]['elo'] += adjustments[new_policy_index]
     return pool
+
 
 # -------------------------------
 # Experience Generation and Training Functions
@@ -189,7 +185,7 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
     """
     Worker function to generate experience.
     For each rollout, a random opponent is sampled from the historical pool.
-    Returns a tuple: (states, actions, masks, returns, advantages, wins).
+    Returns a tuple: (states, actions, masks, returns, advantages, wins, wins_vector, plays_vector).
     """
     with torch.no_grad():
         random.seed(seed)
@@ -202,10 +198,16 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         value_model.load_state_dict(value_params)
 
         wins = 0
+        # Initialize vectors of length equal to the number of opponents in the pool.
+        wins_vector = torch.zeros(len(pool_policy_params), dtype=int)
+        plays_vector = torch.zeros(len(pool_policy_params), dtype=int)
+
         states, actions, masks, returns, advantages = [], [], [], [], []
         for _ in range(num_rollouts):
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
-            sampled_opponent = random.choice(pool_policy_params)
+            # Sample an opponent by index so that we know its position.
+            opponent_index = random.randint(0, len(pool_policy_params) - 1)
+            sampled_opponent = pool_policy_params[opponent_index]
             opponent_policy = Policy(othello.BOARD_SIZE**2)
             opponent_policy.load_state_dict(sampled_opponent['policy_params'])
             env = OthelloEnv(opponent=opponent_policy)
@@ -230,7 +232,12 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
             rollout_returns = discount_cumsum(rollout_rewards, gamma)
             deltas = rollout_rewards + gamma * torch.cat([rollout_values[1:], torch.zeros(1)]) - rollout_values
             rollout_advantages = discount_cumsum(deltas, gamma * lam)
-            wins += 1 if reward > 0 else 0
+            
+            # Record win/plays for the sampled opponent.
+            if reward > 0:
+                wins += 1
+                wins_vector[opponent_index] += 1
+            plays_vector[opponent_index] += 1
 
             states.append(rollout_states)
             actions.append(rollout_actions)
@@ -242,9 +249,8 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         actions = torch.vstack(actions)
         masks = torch.vstack(masks)
         advantages = torch.hstack(advantages)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         returns = torch.hstack(returns)
-        return (states, actions, masks, returns, advantages, wins)
+        return (states, actions, masks, returns, advantages, wins, wins_vector, plays_vector)
 
 
 def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, masks: torch.Tensor, advantages: torch.Tensor, log_probs_old: torch.Tensor, clip_param: float):
@@ -281,7 +287,7 @@ def main():
 
     num_iterations = 300000000
     num_workers = 16
-    rollouts_per_worker = 2048 // num_workers
+    rollouts_per_worker = 1024 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
     initial_elo = 1200
@@ -315,23 +321,29 @@ def main():
             for i in range(num_workers)
         ]
         seed += num_workers
+
+        states_, actions_, masks_, returns_, advantages_ = [], [], [], [], []
+        total_wins_vector = torch.zeros(len(policy_params_pool),dtype=int)
+        total_plays_vector = torch.zeros(len(policy_params_pool), dtype=int)
         wins = 0
 
         results = pool.starmap(generate_experience, args)
-        states_, actions_, masks_, returns_, advantages_ = [], [], [], [], []
-        for states, actions, masks, returns, advantages, wins_ in results:
+        for states, actions, masks, returns, advantages, wins_, wins_vector_, plays_vector_ in results:
             states_.append(states)
             actions_.append(actions)
             masks_.append(masks)
             returns_.append(returns)
             advantages_.append(advantages)
             wins += wins_
+            total_wins_vector += wins_vector_
+            total_plays_vector += plays_vector_
 
         states = torch.cat(states_, dim=0).to(device)
         actions = torch.cat(actions_, dim=0).to(device)
         masks = torch.cat(masks_, dim=0).to(device)
         returns = torch.cat(returns_, dim=0).to(device)
         advantages = torch.cat(advantages_, dim=0).to(device)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         policy_model.to(device)
         value_model.to(device)
@@ -376,10 +388,8 @@ def main():
         writer.add_scalar("Training/PolicyEntropy", mean_policy_entropy, iteration)
 
         print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, " +
-              f"Train win% = {win_percentage:.3f}, Pool size = {len(policy_params_pool)}, Seed={seed}, PolSteps={ip+1}")
-
-        # Save the latest model.
-        save_models(policy_model.state_dict(), value_model.state_dict(), base_name="latest")
+              f"Train win% = {win_percentage:.3f}, Pool size = {len(policy_params_pool)}, "
+              f"WinsVec={total_wins_vector}")
 
         if win_percentage >= win_threshold:
             saturation_counter += 1
@@ -387,6 +397,7 @@ def main():
             saturation_counter = 0
 
         if saturation_counter >= saturation_threshold:
+            save_models(policy_model.state_dict(), value_model.state_dict(), base_name="latest")
             new_policy_name = f"policy_{policy_counter}"
             previous_policy_name = f"policy_{policy_counter - 1}"
             policy_counter += 1
@@ -408,7 +419,8 @@ def main():
                 policy_params_pool = evaluate_new_policy_parallel(
                     policy_params_pool,
                     new_policy_index=len(policy_params_pool) - 1,
-                    seed=seed
+                    seed=seed,
+                    eval_pool=pool
                 )
             seed += len(policy_params_pool)
             writer.add_scalar("Training/LatestPolicyElo", policy_params_pool[-1]['elo'], iteration)
@@ -427,9 +439,10 @@ def main():
                 if param.grad is not None:
                     writer.add_histogram(f"Value/Grads/{name}", param.grad, iteration)
 
+    writer.close()
     pool.close()
     pool.join()
-    writer.close()
+
 
 if __name__ == '__main__':
     mp.set_start_method('spawn', force=True)
