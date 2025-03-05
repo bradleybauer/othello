@@ -8,6 +8,9 @@ from othello_env import OthelloEnv
 from policy_function import Policy
 from value_function import Value
 import torch.multiprocessing as mp
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 # Import TensorBoard’s SummaryWriter
 from torch.utils.tensorboard import SummaryWriter
@@ -54,7 +57,6 @@ def save_models(policy_state, value_state, base_name: str):
         output_names=["value"],
         opset_version=11
     )
-
 
 # -------------------------------
 # Tournament Evaluation Functions (Parallel Version)
@@ -158,7 +160,6 @@ def evaluate_new_policy_parallel(pool, new_policy_index, seed, num_games=8, K=32
     pool[new_policy_index]['elo'] += adjustments[new_policy_index]
     return pool
 
-
 # -------------------------------
 # Experience Generation and Training Functions
 # -------------------------------
@@ -252,7 +253,6 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
         returns = torch.hstack(returns)
         return (states, actions, masks, returns, advantages, wins, wins_vector, plays_vector)
 
-
 def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, masks: torch.Tensor, advantages: torch.Tensor, log_probs_old: torch.Tensor, clip_param: float):
     log_probs, entropy = policy_model.log_probs(states, actions, masks)
     ratio = torch.exp(log_probs - log_probs_old)
@@ -306,6 +306,11 @@ def main():
     saturation_threshold = 20
     win_threshold = 0.51
 
+    # Initialize accumulators for wins and plays, and track the current pool size.
+    prev_pool_size = len(policy_params_pool)
+    accum_wins_vector = torch.zeros(prev_pool_size, dtype=int)
+    accum_plays_vector = torch.zeros(prev_pool_size, dtype=int)
+
     pool = mp.Pool(processes=num_workers)
     for iteration in range(num_iterations):
         args = [
@@ -323,8 +328,9 @@ def main():
         seed += num_workers
 
         states_, actions_, masks_, returns_, advantages_ = [], [], [], [], []
-        total_wins_vector = torch.zeros(len(policy_params_pool),dtype=int)
-        total_plays_vector = torch.zeros(len(policy_params_pool), dtype=int)
+        # Get iteration-specific wins and plays vectors.
+        iteration_wins_vector = torch.zeros(len(policy_params_pool), dtype=int)
+        iteration_plays_vector = torch.zeros(len(policy_params_pool), dtype=int)
         wins = 0
 
         results = pool.starmap(generate_experience, args)
@@ -335,8 +341,8 @@ def main():
             returns_.append(returns)
             advantages_.append(advantages)
             wins += wins_
-            total_wins_vector += wins_vector_
-            total_plays_vector += plays_vector_
+            iteration_wins_vector += wins_vector_
+            iteration_plays_vector += plays_vector_
 
         states = torch.cat(states_, dim=0).to(device)
         actions = torch.cat(actions_, dim=0).to(device)
@@ -353,7 +359,7 @@ def main():
 
         policy_loss = 0
         policy_grad_norm = 0
-        for ip in range(num_policy_steps):
+        for i in range(num_policy_steps):
             policy_optimizer.zero_grad()
             new_policy_loss, kl, mean_policy_entropy = ppo_clip_loss(policy_model, states, actions, masks, advantages, log_probs_old, clip_param)
             if kl > 1.5 * target_kl:
@@ -387,9 +393,34 @@ def main():
         writer.add_scalar("Training/ValueGradNorm", value_grad_norm, iteration)
         writer.add_scalar("Training/PolicyEntropy", mean_policy_entropy, iteration)
 
+        # Check if the pool has increased in size.
+        if len(policy_params_pool) != prev_pool_size:
+            # Reset accumulators when a new policy is added.
+            accum_wins_vector = torch.zeros(len(policy_params_pool), dtype=int)
+            accum_plays_vector = torch.zeros(len(policy_params_pool), dtype=int)
+            prev_pool_size = len(policy_params_pool)
+        # Accumulate the wins/plays for the current iteration.
+        accum_wins_vector += iteration_wins_vector
+        accum_plays_vector += iteration_plays_vector
+
+        # Generate the histogram of win fraction (wins / plays).
+        ratios = []
+        for i in range(len(accum_wins_vector)):
+            plays = accum_plays_vector[i].item()
+            wins_count = accum_wins_vector[i].item()
+            ratio = wins_count / plays if plays > 0 else 0
+            ratios.append(ratio)
+        plt.figure(figsize=(10, 6))
+        plt.bar(range(len(ratios)), ratios)
+        plt.xlabel('Policy Index')
+        plt.ylabel('Win Fraction')
+        plt.title('Accumulated Win/Play Ratio for Historical Policies')
+        plt.savefig("wins_histogram.png")  # Overwrite each iteration
+        plt.close()
+
+        # Print training information without the wins vector.
         print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, " +
-              f"Train win% = {win_percentage:.3f}, Pool size = {len(policy_params_pool)}, "
-              f"WinsVec={total_wins_vector}")
+              f"Train win% = {win_percentage:.3f}, Pool size = {len(policy_params_pool)}")
 
         if win_percentage >= win_threshold:
             saturation_counter += 1
@@ -442,7 +473,6 @@ def main():
     writer.close()
     pool.close()
     pool.join()
-
 
 if __name__ == '__main__':
     mp.set_start_method('spawn', force=True)
