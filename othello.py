@@ -9,7 +9,8 @@ BOARD_SIZE = 8
 BLACK = 1
 WHITE = -1
 EMPTY = 0
-NUM_STARTING_PIECES = (BOARD_SIZE**2) // 2 - 2
+#NUM_STARTING_PIECES = (BOARD_SIZE**2) // 2 - 2
+NUM_STARTING_PIECES = BOARD_SIZE**2
 NOOP_ACTION = (BOARD_SIZE, 0)  # a tuple to represent the no–move action
 
 # Specify the types for the jitclass attributes

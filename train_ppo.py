@@ -100,11 +100,8 @@ def simulate_match(policy1_state, policy2_state, num_games=4):
     Returns the win fraction for policy1.
     """
     wins = 0.0
-    half_games = num_games // 2
-    for _ in range(half_games):
+    for _ in range(num_games):
         wins += play_game(policy1_state, policy2_state)
-    for _ in range(half_games):
-        wins += (1 - play_game(policy2_state, policy1_state))
     return wins / num_games
 
 def update_elo(elo1, elo2, score1, K=32):
@@ -127,6 +124,7 @@ def simulate_pair_match(args):
     i, j, policy_i_state, policy_j_state, elo_i, elo_j, num_games, K, seed = args
     random.seed(seed)
     np.random.seed(seed)
+    torch.manual_seed(seed)
     score1 = simulate_match(policy_i_state, policy_j_state, num_games)
     new_elo_i, new_elo_j = update_elo(elo_i, elo_j, score1, K)
     delta_i = new_elo_i - elo_i
@@ -144,8 +142,8 @@ def evaluate_new_policy_parallel(pool, new_policy_index, seed, num_games=8, K=32
         pair_args.append((
             i,
             new_policy_index,
-            pool[i]['params'],
-            pool[new_policy_index]['params'],
+            pool[i]['policy_params'],
+            pool[new_policy_index]['policy_params'],
             pool[i]['elo'],
             pool[new_policy_index]['elo'],
             num_games,
@@ -209,7 +207,7 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
             sampled_opponent = random.choice(pool_policy_params)
             opponent_policy = Policy(othello.BOARD_SIZE**2)
-            opponent_policy.load_state_dict(sampled_opponent['params'])
+            opponent_policy.load_state_dict(sampled_opponent['policy_params'])
             env = OthelloEnv(opponent=opponent_policy)
             state, info = env.reset()
             done = False
@@ -262,7 +260,7 @@ def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, mas
 # -------------------------------
 
 def main():
-    writer = SummaryWriter(log_dir="runs/othello_experiment_ppo")
+    writer = SummaryWriter(log_dir="runs/othello_experiment_ppo2")
     seed = 42
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -281,19 +279,18 @@ def main():
     num_policy_steps = 80
     num_value_steps = 80
 
-    num_iterations = 3000
+    num_iterations = 300000000
     num_workers = 16
-    rollouts_per_worker = 512 // num_workers
+    rollouts_per_worker = 2048 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
-    pool_size = 50000
     initial_elo = 1200
     policy_params_pool = []
     initial_policies = 5
     for i in range(initial_policies):
         policy_params_pool.append({
             'name': f"policy_{i}",
-            'params': copy.deepcopy(policy_model.state_dict()),
+            'policy_params': copy.deepcopy(policy_model.state_dict()),
             'value_params': copy.deepcopy(value_model.state_dict()),
             'elo': initial_elo
         })
@@ -305,7 +302,6 @@ def main():
 
     pool = mp.Pool(processes=num_workers)
     for iteration in range(num_iterations):
-        value_model.cpu()
         args = [
             (
                 copy.deepcopy(policy_model.state_dict()),
@@ -345,11 +341,10 @@ def main():
 
         policy_loss = 0
         policy_grad_norm = 0
-        for i in range(num_policy_steps):
+        for ip in range(num_policy_steps):
             policy_optimizer.zero_grad()
             new_policy_loss, kl, mean_policy_entropy = ppo_clip_loss(policy_model, states, actions, masks, advantages, log_probs_old, clip_param)
             if kl > 1.5 * target_kl:
-                print(f'Early stopping policy optimization after {i+1} steps')
                 break
             new_policy_loss.backward()
             policy_optimizer.step()
@@ -381,7 +376,7 @@ def main():
         writer.add_scalar("Training/PolicyEntropy", mean_policy_entropy, iteration)
 
         print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, " +
-              f"Train win% = {win_percentage:.3f}, Pool size = {len(policy_params_pool)}.")
+              f"Train win% = {win_percentage:.3f}, Pool size = {len(policy_params_pool)}, Seed={seed}, PolSteps={ip+1}")
 
         # Save the latest model.
         save_models(policy_model.state_dict(), value_model.state_dict(), base_name="latest")
@@ -401,13 +396,9 @@ def main():
                     previous_policy_elo = pol['elo']
                     break
             print(f"Adding current policy as {new_policy_name} to historical pool.")
-            if len(policy_params_pool) >= pool_size:
-                lowest_index = min(range(len(policy_params_pool)), key=lambda i: policy_params_pool[i]['elo'])
-                removed_policy = policy_params_pool.pop(lowest_index)
-                print(f"Removed {removed_policy['name']} with Elo {removed_policy['elo']:.1f}")
             policy_params_pool.append({
                 'name': new_policy_name,
-                'params': copy.deepcopy(policy_model.state_dict()),
+                'policy_params': copy.deepcopy(policy_model.state_dict()),
                 'value_params': copy.deepcopy(value_model.state_dict()),
                 'elo': previous_policy_elo
             })
@@ -424,7 +415,7 @@ def main():
             for entry in policy_params_pool:
                 print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
             max_policy = max(policy_params_pool, key=lambda entry: entry['elo'])
-            save_models(max_policy['params'], max_policy['value_params'], base_name="latest_max_elo")
+            save_models(max_policy['policy_params'], max_policy['value_params'], base_name="latest_max_elo")
 
         if iteration % 100 == 0:
             for name, param in policy_model.named_parameters():

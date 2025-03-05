@@ -50,8 +50,11 @@ class OthelloEnv(gym.Env):
         # Initial self.game.player is random to simulate that the agent under optimization does not always
         # go first. (agent is always BLACK)
         if self.game.player == othello.WHITE:
-            possible_actions = self.game.get_legal_actions(othello.WHITE)
-            action = random.choice(possible_actions)
+            action_mask = self.get_info()['action_mask']
+            with torch.no_grad():
+                state_tensor = torch.from_numpy(-board).reshape(1,-1).float()
+                flat_action = self.opponent.select_action(state_tensor, torch.from_numpy(action_mask))
+            action = self.inflate_action(flat_action.item())
             if isinstance(action, np.ndarray):
                 action = tuple(action.tolist())
             self.game.step(action)
@@ -156,7 +159,7 @@ class OthelloEnv(gym.Env):
             action_mask = info['action_mask']
             with torch.no_grad():
                 # the model always plays as BLACK
-                state_tensor = -torch.from_numpy(state).float().reshape(1,-1)
+                state_tensor = torch.from_numpy(-state).reshape(1,-1).float()
                 flat_action = self.opponent.select_action(state_tensor, torch.from_numpy(action_mask))
                 action = self.inflate_action(flat_action.item())
             done = self.game.step(action)
