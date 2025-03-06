@@ -397,7 +397,7 @@ def main():
                 plays = accum_plays_vector[i].item()
                 wins = accum_wins_vector[i].item()
                 win_fraction = wins / plays if plays > 0 else 0
-                f.write(f"{i}, {wins}, {plays}, {win_fraction:.3f}\n")
+                f.write(f"{win_fraction:.3f}\n")
 
         elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
         writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
