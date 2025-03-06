@@ -51,7 +51,7 @@ def load_pool_from_dir(pool_dir):
                         "elo": meta["elo"],
                     }
                     pool.append(entry)
-    return pool
+    return sorted(pool, key=lambda x: int(x["name"].split('_')[-1]))
 
 class EloManager:
     def __init__(self, initial_elo=1200, pool_dir="policy_pool"):
@@ -118,32 +118,33 @@ def discount_cumsum(x, discount):
         result[i] = running_sum
     return result
 
-def generate_experience(policy_params, value_params, pool_policy_params, gamma, lam, num_rollouts, seed):
+def generate_experience(policy_params, value_params, cached_opponent_policies, gamma, lam, num_rollouts, seed):
     with torch.no_grad():
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
 
+        # Construct local models for the current agent.
         policy_model = Policy(othello.BOARD_SIZE**2)
         policy_model.load_state_dict(policy_params)
         value_model = Value(othello.BOARD_SIZE**2)
         value_model.load_state_dict(value_params)
 
+        num_opponents = len(cached_opponent_policies)
         wins = 0
         draws = 0
         losses = 0
-        wins_vector = torch.zeros(len(pool_policy_params), dtype=int)
-        draws_vector = torch.zeros(len(pool_policy_params), dtype=int)
-        losses_vector = torch.zeros(len(pool_policy_params), dtype=int)
-        plays_vector = torch.zeros(len(pool_policy_params), dtype=int)
+        wins_vector = torch.zeros(num_opponents, dtype=int)
+        draws_vector = torch.zeros(num_opponents, dtype=int)
+        losses_vector = torch.zeros(num_opponents, dtype=int)
+        plays_vector = torch.zeros(num_opponents, dtype=int)
 
         states, actions, masks, returns, advantages = [], [], [], [], []
         for _ in range(num_rollouts):
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
-            opponent_index = random.randint(0, len(pool_policy_params) - 1)
-            sampled_opponent = pool_policy_params[opponent_index]
-            opponent_policy = Policy(othello.BOARD_SIZE**2)
-            opponent_policy.load_state_dict(sampled_opponent['policy_params'])
+            # Randomly select an opponent from the cached list.
+            opponent_index = random.randint(0, num_opponents - 1)
+            opponent_policy = cached_opponent_policies[opponent_index]
             env = OthelloEnv(opponent=opponent_policy)
             state, info = env.reset()
             done = False
@@ -192,6 +193,21 @@ def generate_experience(policy_params, value_params, pool_policy_params, gamma, 
                 wins, draws, losses,
                 wins_vector, draws_vector, losses_vector, plays_vector)
 
+def worker_process(worker_id, task_queue, result_queue, initial_cached_policies):
+    cached_opponent_policies = [Policy(othello.BOARD_SIZE**2) for _ in initial_cached_policies]
+    for policy,params in zip(cached_opponent_policies, initial_cached_policies):
+        policy.load_state_dict(params)
+    while True:
+        task = task_queue.get()
+        if task is None:
+            break
+        policy_state, value_state, gamma, lam, num_rollouts, seed, new_opponent_policy = task
+        if new_opponent_policy:
+            cached_opponent_policies.append(Policy(othello.BOARD_SIZE**2))
+            cached_opponent_policies[-1].load_state_dict(new_opponent_policy)
+        result = generate_experience(policy_state, value_state, cached_opponent_policies, gamma, lam, num_rollouts, seed)
+        result_queue.put(result)
+
 def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, masks: torch.Tensor,
                   advantages: torch.Tensor, log_probs_old: torch.Tensor, clip_param: float):
     log_probs, entropy = policy_model.log_probs(states, actions, masks)
@@ -217,11 +233,15 @@ def main():
 
     if os.path.exists("latest_policy.pth") and os.path.exists("latest_value.pth"):
         print("Loading main models from latest_policy.pth and latest_value.pth")
-        policy_model.load_state_dict(torch.load("latest_policy.pth", map_location="cpu", weights_only=True))
-        value_model.load_state_dict(torch.load("latest_value.pth", map_location="cpu", weights_only=True))
+        policy_model.load_state_dict(torch.load("latest_policy.pth", weights_only=True))
+        value_model.load_state_dict(torch.load("latest_value.pth", weights_only=True))
+        policy_model.to(device)
+        value_model.to(device)
         if os.path.exists("latest_policy_opt.pth") and os.path.exists("latest_value_opt.pth"):
-            policy_optimizer.load_state_dict(torch.load("latest_policy_opt.pth", map_location="cpu"))
-            value_optimizer.load_state_dict(torch.load("latest_value_opt.pth", map_location="cpu"))
+            policy_optimizer.load_state_dict(torch.load("latest_policy_opt.pth", weights_only=True))
+            value_optimizer.load_state_dict(torch.load("latest_value_opt.pth", weights_only=True))
+        policy_model.cpu()
+        value_model.cpu()
 
     gamma = 0.99
     lam = 0.95
@@ -236,10 +256,14 @@ def main():
     total_rollouts = num_workers * rollouts_per_worker
 
     initial_elo = 1200
-    pool_dir = "policy_pool"
-    elo_manager = EloManager(initial_elo=initial_elo, pool_dir=pool_dir)
+    elo_manager = EloManager(initial_elo=initial_elo, pool_dir="policy_pool")
     if len(elo_manager.pool) == 0:
         elo_manager.add_initial_policy("policy_0", policy_model, value_model)
+
+    initial_cached_policies = []
+    for entry in elo_manager.pool:
+        initial_cached_policies.append(entry['policy_params'])
+    new_opponent_policy = None
 
     saturation_counter = 0
     saturation_threshold = 20
@@ -251,21 +275,28 @@ def main():
     accum_losses_vector = torch.zeros(prev_pool_size, dtype=int)
     accum_plays_vector = torch.zeros(prev_pool_size, dtype=int)
 
-    pool = mp.Pool(processes=num_workers)
+    task_queue = mp.Queue()
+    result_queue = mp.Queue()
+    workers = []
+    for worker_id in range(num_workers):
+        p = mp.Process(target=worker_process, args=(worker_id, task_queue, result_queue, initial_cached_policies))
+        p.start()
+        workers.append(p)
+
     for iteration in range(num_iterations):
-        args = [
-            (
+        # When dispatching tasks, include any new cached policies (if any) then clear the list.
+        for i in range(num_workers):
+            task_queue.put((
                 copy.deepcopy(policy_model.state_dict()),
                 copy.deepcopy(value_model.state_dict()),
-                elo_manager.pool,
                 gamma,
                 lam,
                 rollouts_per_worker,
-                seed + i
-            )
-            for i in range(num_workers)
-        ]
+                seed + i,
+                new_opponent_policy,
+            ))
         seed += num_workers
+        new_opponent_policy = None
 
         states_, actions_, masks_, returns_, advantages_ = [], [], [], [], []
         iteration_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
@@ -275,8 +306,7 @@ def main():
         wins_total = 0
         draws_total = 0
         losses_total = 0
-
-        results = pool.starmap(generate_experience, args)
+        results = [result_queue.get() for _ in range(num_workers)]
         for (states, actions, masks, returns, advantages,
              wins_, draws_, losses_,
              wins_vector_, draws_vector_, losses_vector_, plays_vector_) in results:
@@ -377,13 +407,16 @@ def main():
                             policy_optimizer.state_dict(), value_optimizer.state_dict(),
                             base_name="latest")
             elo_manager.add_new_policy(policy_model, value_model)
+            new_opponent_policy = policy_model.state_dict()
             saturation_counter = 0
             max_policy = max(elo_manager.pool, key=lambda entry: entry['elo'])
             save_models(max_policy['policy_params'], max_policy['value_params'], base_name="latest_max_elo")
 
     writer.close()
-    pool.close()
-    pool.join()
+    for _ in range(num_workers):
+        task_queue.put(None)
+    for p in workers:
+        p.join()
 
 if __name__ == '__main__':
     mp.set_start_method('spawn', force=True)
