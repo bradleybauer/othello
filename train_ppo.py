@@ -10,11 +10,12 @@ from value_function import Value
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 
-def save_checkpoint(path, iteration, policy_state, value_state,
+def save_checkpoint(path, iteration, seed, policy_state, value_state,
                     policy_optimizer_state, value_optimizer_state, elo_manager_state,
                     best_elo, best_policy_state, best_value_state):
     checkpoint = {
         "iteration": iteration,
+        "seed": seed,
         "policy_state": policy_state,
         "value_state": value_state,
         "policy_optimizer_state": policy_optimizer_state,
@@ -29,6 +30,7 @@ def save_checkpoint(path, iteration, policy_state, value_state,
 def load_checkpoint(path):
     checkpoint = torch.load(path, map_location="cpu")
     return (checkpoint["iteration"],
+            checkpoint["seed"],
             checkpoint["policy_state"],
             checkpoint["value_state"],
             checkpoint["policy_optimizer_state"],
@@ -217,10 +219,10 @@ def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, mas
 
 def main():
     writer = SummaryWriter(log_dir="runs/othello_experiment_ppo2")
+    checkpoint_path = "checkpoint.pth"
+    initial_elo = 1200
+    start_iteration = 0
     seed = 42
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
 
     device = torch.device("cuda")
     policy_model = Policy(othello.BOARD_SIZE**2)
@@ -229,12 +231,10 @@ def main():
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=0.0003)
     value_optimizer = optim.Adam(value_model.parameters(), lr=0.0005)
 
-    checkpoint_path = "checkpoint.pth"
-    initial_elo = 1200
-    start_iteration = 0
     if os.path.exists(checkpoint_path):
         print("Loading checkpoint...")
         (start_iteration,
+         seed,
          policy_state,
          value_state,
          policy_opt_state,
@@ -259,6 +259,10 @@ def main():
         best_elo = initial_elo
         best_policy_state = get_cpu_state(policy_model)
         best_value_state = get_cpu_state(value_model)
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
     gamma = 0.99
     lam = 0.95
@@ -299,10 +303,12 @@ def main():
     checkpoint_interval = 20
 
     for iteration in range(start_iteration, num_iterations):
+        policy_cpu_state = get_cpu_state(policy_model)
+        value_cpu_state = get_cpu_state(value_model)
         for i in range(num_workers):
             task_queue.put((
-                get_cpu_state(policy_model),
-                get_cpu_state(value_model),
+                policy_cpu_state,
+                value_cpu_state,
                 gamma,
                 lam,
                 rollouts_per_worker,
@@ -419,10 +425,11 @@ def main():
             new_opponent_policy = policy_cpu_state
             saturation_counter = 0
 
-        if iteration % checkpoint_interval == 0:
+        if iteration % checkpoint_interval == 0 and iteration > start_iteration:
             save_checkpoint(
                 checkpoint_path,
                 iteration,
+                seed,
                 get_cpu_state(policy_model),
                 get_cpu_state(value_model),
                 policy_optimizer.state_dict(),
