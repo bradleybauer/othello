@@ -10,15 +10,11 @@ from value_function import Value
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 
-def save_models(policy_state, value_state, base_name: str):
-    torch.save(policy_state, f"{base_name}_policy.pth")
-    torch.save(value_state, f"{base_name}_value.pth")
-
-def save_main_state(policy_state, value_state, policy_optimizer_state, value_optimizer_state, base_name: str):
-    torch.save(policy_state, f"{base_name}_policy.pth")
-    torch.save(value_state, f"{base_name}_value.pth")
-    torch.save(policy_optimizer_state, f"{base_name}_policy_opt.pth")
-    torch.save(value_optimizer_state, f"{base_name}_value_opt.pth")
+def save_latest_models(policy_state, value_state, policy_optimizer_state, value_optimizer_state):
+    torch.save(policy_state, "latest_policy.pth")
+    torch.save(value_state, "latest_value.pth")
+    torch.save(policy_optimizer_state, "latest_policy_opt.pth")
+    torch.save(value_optimizer_state, "latest_value_opt.pth")
 
 def save_policy_to_dir(entry, pool_dir):
     """Save a single policy entry (with its policy/value state and Elo) to its own subdirectory."""
@@ -53,12 +49,17 @@ def load_pool_from_dir(pool_dir):
     return sorted(pool, key=lambda x: int(x["name"].split('_')[-1]))
 
 class EloManager:
-    def __init__(self, initial_elo=1200, pool_dir="policy_pool"):
-        self.current_policy_elo = initial_elo
+    def __init__(self, initial_elo=1200):
+        self.pool_dir = "policy_pool"
+        self.elo_file = "latest_policy_elo.pth"
+        os.makedirs(self.pool_dir, exist_ok=True)
+        if os.path.exists(self.elo_file):
+            self.current_policy_elo = torch.load(self.elo_file)
+            print(f"Loaded current_policy_elo: {self.current_policy_elo}")
+        else:
+            self.current_policy_elo = initial_elo
         self.pool = []
         self.policy_counter = 0
-        self.pool_dir = pool_dir
-        os.makedirs(self.pool_dir, exist_ok=True)
         loaded_pool = load_pool_from_dir(self.pool_dir)
         if loaded_pool:
             self.pool = loaded_pool
@@ -90,6 +91,7 @@ class EloManager:
                 delta_current = K * (s - E_current)
                 total_delta_current += delta_current
         self.current_policy_elo = R_current + total_delta_current
+        torch.save(self.current_policy_elo, self.elo_file)
 
     def add_new_policy(self, policy_state, value_state):
         new_policy_name = f"policy_{self.policy_counter}"
@@ -260,9 +262,15 @@ def main():
     total_rollouts = num_workers * rollouts_per_worker
 
     initial_elo = 1200
-    elo_manager = EloManager(initial_elo=initial_elo, pool_dir="policy_pool")
+    elo_manager = EloManager(initial_elo=initial_elo)
     if len(elo_manager.pool) == 0:
         elo_manager.add_initial_policy("policy_0", policy_model, value_model)
+
+    if os.path.exists("best_elo.pth"):
+        best_elo = torch.load("best_elo.pth")
+        print(f"Loaded best_elo: {best_elo}")
+    else:
+        best_elo = initial_elo
 
     initial_cached_policies = [entry['policy_params'] for entry in elo_manager.pool]
     new_opponent_policy = None
@@ -392,6 +400,11 @@ def main():
               f"Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, " +
               f"Current policy Elo: {elo_manager.current_policy_elo:.1f}")
 
+        current_policy_elo = elo_manager.current_policy_elo
+        if current_policy_elo > best_elo:
+            best_elo = current_policy_elo
+            torch.save(best_elo, "best_elo.pth")
+
         if win_percentage >= win_threshold:
             saturation_counter += 1
         else:
@@ -400,14 +413,10 @@ def main():
         if saturation_counter >= saturation_threshold:
             policy_cpu_state = get_cpu_state(policy_model)
             value_cpu_state = get_cpu_state(value_model)
-            save_main_state(policy_cpu_state, value_cpu_state,
-                            policy_optimizer.state_dict(), value_optimizer.state_dict(),
-                            base_name="latest")
+            save_latest_models(policy_cpu_state, value_cpu_state, policy_optimizer.state_dict(), value_optimizer.state_dict())
             elo_manager.add_new_policy(policy_cpu_state, value_cpu_state)
             new_opponent_policy = policy_cpu_state
             saturation_counter = 0
-            max_policy = max(elo_manager.pool, key=lambda entry: entry['elo'])
-            save_models(max_policy['policy_params'], max_policy['value_params'], base_name="latest_max_elo")
 
     writer.close()
     for _ in range(num_workers):
