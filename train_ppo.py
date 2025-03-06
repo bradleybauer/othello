@@ -392,7 +392,6 @@ def main():
         accum_plays_vector += iteration_plays_vector
 
         with open("win_rate_data.txt", "w") as f:
-            f.write("Policy Index, Wins, Plays, Win Fraction\n")
             for i in range(len(accum_wins_vector)):
                 plays = accum_plays_vector[i].item()
                 wins = accum_wins_vector[i].item()
