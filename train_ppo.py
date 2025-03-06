@@ -41,8 +41,10 @@ def load_checkpoint(path):
             checkpoint["best_value_state"])
 
 class EloManager:
-    def __init__(self, initial_elo=1200):
+    def __init__(self, initial_elo=1200, smoothing_coef=0.95):
         self.current_policy_elo = initial_elo
+        self.smooth_current_policy_elo = initial_elo
+        self.smoothing_coef = smoothing_coef
         self.pool = []
         self.policy_counter = 0
 
@@ -70,6 +72,8 @@ class EloManager:
                 delta_current = K * (s - E_current)
                 total_delta_current += delta_current
         self.current_policy_elo = R_current + total_delta_current
+        self.smooth_current_policy_elo = (self.smoothing_coef * self.smooth_current_policy_elo +
+                                          (1 - self.smoothing_coef) * self.current_policy_elo)
 
     def add_new_policy(self, policy_state, value_state):
         new_policy_name = f"policy_{self.policy_counter}"
@@ -92,12 +96,14 @@ class EloManager:
         return {
             "pool": self.pool,
             "current_policy_elo": self.current_policy_elo,
+            "smooth_current_policy_elo": self.smooth_current_policy_elo,
             "policy_counter": self.policy_counter,
         }
     
     def load_state_dict(self, state):
         self.pool = state["pool"]
         self.current_policy_elo = state["current_policy_elo"]
+        self.smooth_current_policy_elo = state.get("smooth_current_policy_elo", self.current_policy_elo)
         self.policy_counter = state["policy_counter"]
 
 def discount_cumsum(x, discount):
@@ -406,10 +412,10 @@ def main():
 
         elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
         writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
-        print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current policy Elo: {elo_manager.current_policy_elo:.1f}")
+        print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}")
 
-        if elo_manager.current_policy_elo > best_elo:
-            best_elo = elo_manager.current_policy_elo
+        if elo_manager.smooth_current_policy_elo > best_elo:
+            best_elo = elo_manager.smooth_current_policy_elo
             best_policy_state = get_cpu_state(policy_model)
             best_value_state = get_cpu_state(value_model)
 
