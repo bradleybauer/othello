@@ -10,61 +10,39 @@ from value_function import Value
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 
-def save_latest_models(policy_state, value_state, policy_optimizer_state, value_optimizer_state):
-    torch.save(policy_state, "latest_policy.pth")
-    torch.save(value_state, "latest_value.pth")
-    torch.save(policy_optimizer_state, "latest_policy_opt.pth")
-    torch.save(value_optimizer_state, "latest_value_opt.pth")
+def save_checkpoint(path, iteration, policy_state, value_state,
+                    policy_optimizer_state, value_optimizer_state, elo_manager_state,
+                    best_elo, best_policy_state, best_value_state):
+    checkpoint = {
+        "iteration": iteration,
+        "policy_state": policy_state,
+        "value_state": value_state,
+        "policy_optimizer_state": policy_optimizer_state,
+        "value_optimizer_state": value_optimizer_state,
+        "elo_manager": elo_manager_state,
+        "best_elo": best_elo,
+        "best_policy_state": best_policy_state,
+        "best_value_state": best_value_state,
+    }
+    torch.save(checkpoint, path)
 
-def save_policy_to_dir(entry, pool_dir):
-    """Save a single policy entry (with its policy/value state and Elo) to its own subdirectory."""
-    subdir = os.path.join(pool_dir, entry['name'])
-    os.makedirs(subdir, exist_ok=True)
-    torch.save(entry['policy_params'], os.path.join(subdir, "policy.pth"))
-    torch.save(entry['value_params'], os.path.join(subdir, "value.pth"))
-    meta = {"name": entry["name"], "elo": entry["elo"]}
-    torch.save(meta, os.path.join(subdir, "meta.pth"))
-
-def load_pool_from_dir(pool_dir):
-    """Load previously saved policies from subdirectories of pool_dir."""
-    pool = []
-    if os.path.exists(pool_dir):
-        for folder in os.listdir(pool_dir):
-            subdir = os.path.join(pool_dir, folder)
-            if os.path.isdir(subdir):
-                policy_path = os.path.join(subdir, "policy.pth")
-                value_path = os.path.join(subdir, "value.pth")
-                meta_path = os.path.join(subdir, "meta.pth")
-                if os.path.exists(policy_path) and os.path.exists(value_path) and os.path.exists(meta_path):
-                    policy_params = torch.load(policy_path, map_location="cpu", weights_only=True)
-                    value_params = torch.load(value_path, map_location="cpu", weights_only=True)
-                    meta = torch.load(meta_path)
-                    entry = {
-                        "name": meta["name"],
-                        "policy_params": policy_params,
-                        "value_params": value_params,
-                        "elo": meta["elo"],
-                    }
-                    pool.append(entry)
-    return sorted(pool, key=lambda x: int(x["name"].split('_')[-1]))
+def load_checkpoint(path):
+    checkpoint = torch.load(path, map_location="cpu")
+    return (checkpoint["iteration"],
+            checkpoint["policy_state"],
+            checkpoint["value_state"],
+            checkpoint["policy_optimizer_state"],
+            checkpoint["value_optimizer_state"],
+            checkpoint["elo_manager"],
+            checkpoint["best_elo"],
+            checkpoint["best_policy_state"],
+            checkpoint["best_value_state"])
 
 class EloManager:
     def __init__(self, initial_elo=1200):
-        self.pool_dir = "policy_pool"
-        self.elo_file = "latest_policy_elo.pth"
-        os.makedirs(self.pool_dir, exist_ok=True)
-        if os.path.exists(self.elo_file):
-            self.current_policy_elo = torch.load(self.elo_file)
-            print(f"Loaded current_policy_elo: {self.current_policy_elo}")
-        else:
-            self.current_policy_elo = initial_elo
+        self.current_policy_elo = initial_elo
         self.pool = []
         self.policy_counter = 0
-        loaded_pool = load_pool_from_dir(self.pool_dir)
-        if loaded_pool:
-            self.pool = loaded_pool
-            self.policy_counter = len(loaded_pool)
-            print(f"Loaded {len(loaded_pool)} policies from {self.pool_dir}")
 
     def add_initial_policy(self, name, policy, value):
         entry = {
@@ -75,7 +53,6 @@ class EloManager:
         }
         self.pool.append(entry)
         self.policy_counter += 1
-        save_policy_to_dir(entry, self.pool_dir)
 
     def update_ratings(self, iteration_wins_vector, iteration_draws_vector, iteration_plays_vector):
         K = 32
@@ -91,7 +68,6 @@ class EloManager:
                 delta_current = K * (s - E_current)
                 total_delta_current += delta_current
         self.current_policy_elo = R_current + total_delta_current
-        torch.save(self.current_policy_elo, self.elo_file)
 
     def add_new_policy(self, policy_state, value_state):
         new_policy_name = f"policy_{self.policy_counter}"
@@ -105,11 +81,22 @@ class EloManager:
         self.policy_counter += 1
         print(f"Adding current policy as {new_policy_name} to pool with Elo {self.current_policy_elo:.1f}.")
         self.print_pool_ratings()
-        save_policy_to_dir(entry, self.pool_dir)
 
     def print_pool_ratings(self):
         for entry in self.pool:
             print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
+
+    def state_dict(self):
+        return {
+            "pool": self.pool,
+            "current_policy_elo": self.current_policy_elo,
+            "policy_counter": self.policy_counter,
+        }
+    
+    def load_state_dict(self, state):
+        self.pool = state["pool"]
+        self.current_policy_elo = state["current_policy_elo"]
+        self.policy_counter = state["policy_counter"]
 
 def discount_cumsum(x, discount):
     n = x.shape[0]
@@ -119,7 +106,6 @@ def discount_cumsum(x, discount):
     discounted_cumsum = torch.flip(torch.cumsum(torch.flip(discounted_x, dims=[0]), dim=0), dims=[0])
     return discounted_cumsum / discount_factors
 
-# --- Helper to get state dict on CPU without moving the entire model ---
 def get_cpu_state(model):
     return {k: v.cpu() for k, v in model.state_dict().items()}
 
@@ -129,7 +115,6 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-        # Construct local models for the current agent.
         policy_model = Policy(othello.BOARD_SIZE**2)
         policy_model.load_state_dict(policy_params)
         value_model = Value(othello.BOARD_SIZE**2)
@@ -244,18 +229,36 @@ def main():
     policy_optimizer = optim.Adam(policy_model.parameters(), lr=0.0003)
     value_optimizer = optim.Adam(value_model.parameters(), lr=0.0005)
 
-    if os.path.exists("latest_policy.pth") and os.path.exists("latest_value.pth"):
-        print("Loading main models from latest_policy.pth and latest_value.pth")
-        policy_model.load_state_dict(torch.load("latest_policy.pth", weights_only=True))
-        value_model.load_state_dict(torch.load("latest_value.pth", weights_only=True))
+    checkpoint_path = "checkpoint.pth"
+    initial_elo = 1200
+    start_iteration = 0
+    if os.path.exists(checkpoint_path):
+        print("Loading checkpoint...")
+        (start_iteration,
+         policy_state,
+         value_state,
+         policy_opt_state,
+         value_opt_state,
+         elo_manager_state,
+         best_elo,
+         best_policy_state,
+         best_value_state) = load_checkpoint(checkpoint_path)
+        policy_model.load_state_dict(policy_state)
+        value_model.load_state_dict(value_state)
         policy_model.to(device)
         value_model.to(device)
-        if os.path.exists("latest_policy_opt.pth") and os.path.exists("latest_value_opt.pth"):
-            policy_optimizer.load_state_dict(torch.load("latest_policy_opt.pth", weights_only=True))
-            value_optimizer.load_state_dict(torch.load("latest_value_opt.pth", weights_only=True))
+        policy_optimizer.load_state_dict(policy_opt_state)
+        value_optimizer.load_state_dict(value_opt_state)
+        elo_manager = EloManager(initial_elo=initial_elo)
+        elo_manager.load_state_dict(elo_manager_state)
+        print(f"Resuming from iteration {start_iteration}.")
     else:
         policy_model.to(device)
         value_model.to(device)
+        elo_manager = EloManager(initial_elo=initial_elo)
+        best_elo = initial_elo
+        best_policy_state = get_cpu_state(policy_model)
+        best_value_state = get_cpu_state(value_model)
 
     gamma = 0.99
     lam = 0.95
@@ -269,16 +272,8 @@ def main():
     rollouts_per_worker = 1024 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
-    initial_elo = 1200
-    elo_manager = EloManager(initial_elo=initial_elo)
     if len(elo_manager.pool) == 0:
         elo_manager.add_initial_policy("policy_0", policy_model, value_model)
-
-    if os.path.exists("best_elo.pth"):
-        best_elo = torch.load("best_elo.pth")
-        print(f"Loaded best_elo: {best_elo}")
-    else:
-        best_elo = initial_elo
 
     initial_cached_policies = [entry['policy_params'] for entry in elo_manager.pool]
     new_opponent_policy = None
@@ -301,7 +296,9 @@ def main():
         p.start()
         workers.append(p)
 
-    for iteration in range(num_iterations):
+    checkpoint_interval = 20
+
+    for iteration in range(start_iteration, num_iterations):
         for i in range(num_workers):
             task_queue.put((
                 get_cpu_state(policy_model),
@@ -404,14 +401,12 @@ def main():
 
         elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
         writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
-        print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, " +
-              f"Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, " +
-              f"Current policy Elo: {elo_manager.current_policy_elo:.1f}")
+        print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current policy Elo: {elo_manager.current_policy_elo:.1f}")
 
-        current_policy_elo = elo_manager.current_policy_elo
-        if current_policy_elo > best_elo:
-            best_elo = current_policy_elo
-            torch.save(best_elo, "best_elo.pth")
+        if elo_manager.current_policy_elo > best_elo:
+            best_elo = elo_manager.current_policy_elo
+            best_policy_state = get_cpu_state(policy_model)
+            best_value_state = get_cpu_state(value_model)
 
         if win_percentage >= win_threshold:
             saturation_counter += 1
@@ -421,10 +416,23 @@ def main():
         if saturation_counter >= saturation_threshold:
             policy_cpu_state = get_cpu_state(policy_model)
             value_cpu_state = get_cpu_state(value_model)
-            save_latest_models(policy_cpu_state, value_cpu_state, policy_optimizer.state_dict(), value_optimizer.state_dict())
             elo_manager.add_new_policy(policy_cpu_state, value_cpu_state)
             new_opponent_policy = policy_cpu_state
             saturation_counter = 0
+
+        if iteration % checkpoint_interval == 0:
+            save_checkpoint(
+                checkpoint_path,
+                iteration,
+                get_cpu_state(policy_model),
+                get_cpu_state(value_model),
+                policy_optimizer.state_dict(),
+                value_optimizer.state_dict(),
+                elo_manager.state_dict(),
+                best_elo,
+                best_policy_state,
+                best_value_state
+            )
 
     writer.close()
     for _ in range(num_workers):
