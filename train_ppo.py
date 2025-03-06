@@ -145,9 +145,17 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
         plays_vector = torch.zeros(num_opponents, dtype=int)
 
         states, actions, masks, returns, advantages = [], [], [], [], []
-        for _ in range(num_rollouts):
+
+        opponent_indices = []
+        full_rounds = num_rollouts // num_opponents
+        remainder = num_rollouts % num_opponents
+        for _ in range(full_rounds):
+            opponent_indices.extend(range(num_opponents))
+        if remainder > 0:
+            opponent_indices.extend(random.sample(range(num_opponents), remainder))
+
+        for opponent_index in opponent_indices:
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
-            opponent_index = random.randint(0, num_opponents - 1)
             opponent_policy = cached_opponent_policies[opponent_index]
             env = OthelloEnv(opponent=opponent_policy)
             state, info = env.reset()
