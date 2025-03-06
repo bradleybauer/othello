@@ -1,5 +1,4 @@
 import os
-import copy
 import torch
 import torch.optim as optim
 import numpy as np
@@ -69,8 +68,8 @@ class EloManager:
     def add_initial_policy(self, name, policy, value):
         entry = {
             'name': name,
-            'policy_params': copy.deepcopy(policy.state_dict()),
-            'value_params': copy.deepcopy(value.state_dict()),
+            'policy_params': get_cpu_state(policy),
+            'value_params': get_cpu_state(value),
             'elo': self.current_policy_elo,
         }
         self.pool.append(entry)
@@ -92,12 +91,12 @@ class EloManager:
                 total_delta_current += delta_current
         self.current_policy_elo = R_current + total_delta_current
 
-    def add_new_policy(self, policy_model, value_model):
+    def add_new_policy(self, policy_state, value_state):
         new_policy_name = f"policy_{self.policy_counter}"
         entry = {
             'name': new_policy_name,
-            'policy_params': copy.deepcopy(policy_model.state_dict()),
-            'value_params': copy.deepcopy(value_model.state_dict()),
+            'policy_params': policy_state,
+            'value_params': value_state,
             'elo': self.current_policy_elo,
         }
         self.pool.append(entry)
@@ -111,12 +110,16 @@ class EloManager:
             print(f"  {entry['name']}: Elo = {entry['elo']:.1f}")
 
 def discount_cumsum(x, discount):
-    result = torch.zeros_like(x)
-    running_sum = 0
-    for i in range(len(x) - 1, -1, -1):
-        running_sum = x[i] + discount * running_sum
-        result[i] = running_sum
-    return result
+    n = x.shape[0]
+    device = x.device
+    discount_factors = discount ** torch.arange(n, dtype=x.dtype, device=device)
+    discounted_x = x * discount_factors
+    discounted_cumsum = torch.flip(torch.cumsum(torch.flip(discounted_x, dims=[0]), dim=0), dims=[0])
+    return discounted_cumsum / discount_factors
+
+# --- Helper to get state dict on CPU without moving the entire model ---
+def get_cpu_state(model):
+    return {k: v.cpu() for k, v in model.state_dict().items()}
 
 def generate_experience(policy_params, value_params, cached_opponent_policies, gamma, lam, num_rollouts, seed):
     with torch.no_grad():
@@ -142,7 +145,6 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
         states, actions, masks, returns, advantages = [], [], [], [], []
         for _ in range(num_rollouts):
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
-            # Randomly select an opponent from the cached list.
             opponent_index = random.randint(0, num_opponents - 1)
             opponent_policy = cached_opponent_policies[opponent_index]
             env = OthelloEnv(opponent=opponent_policy)
@@ -195,7 +197,7 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
 
 def worker_process(worker_id, task_queue, result_queue, initial_cached_policies):
     cached_opponent_policies = [Policy(othello.BOARD_SIZE**2) for _ in initial_cached_policies]
-    for policy,params in zip(cached_opponent_policies, initial_cached_policies):
+    for policy, params in zip(cached_opponent_policies, initial_cached_policies):
         policy.load_state_dict(params)
     while True:
         task = task_queue.get()
@@ -203,8 +205,9 @@ def worker_process(worker_id, task_queue, result_queue, initial_cached_policies)
             break
         policy_state, value_state, gamma, lam, num_rollouts, seed, new_opponent_policy = task
         if new_opponent_policy:
-            cached_opponent_policies.append(Policy(othello.BOARD_SIZE**2))
-            cached_opponent_policies[-1].load_state_dict(new_opponent_policy)
+            new_policy = Policy(othello.BOARD_SIZE**2)
+            new_policy.load_state_dict(new_opponent_policy)
+            cached_opponent_policies.append(new_policy)
         result = generate_experience(policy_state, value_state, cached_opponent_policies, gamma, lam, num_rollouts, seed)
         result_queue.put(result)
 
@@ -240,8 +243,9 @@ def main():
         if os.path.exists("latest_policy_opt.pth") and os.path.exists("latest_value_opt.pth"):
             policy_optimizer.load_state_dict(torch.load("latest_policy_opt.pth", weights_only=True))
             value_optimizer.load_state_dict(torch.load("latest_value_opt.pth", weights_only=True))
-        policy_model.cpu()
-        value_model.cpu()
+    else:
+        policy_model.to(device)
+        value_model.to(device)
 
     gamma = 0.99
     lam = 0.95
@@ -260,9 +264,7 @@ def main():
     if len(elo_manager.pool) == 0:
         elo_manager.add_initial_policy("policy_0", policy_model, value_model)
 
-    initial_cached_policies = []
-    for entry in elo_manager.pool:
-        initial_cached_policies.append(entry['policy_params'])
+    initial_cached_policies = [entry['policy_params'] for entry in elo_manager.pool]
     new_opponent_policy = None
 
     saturation_counter = 0
@@ -284,11 +286,10 @@ def main():
         workers.append(p)
 
     for iteration in range(num_iterations):
-        # When dispatching tasks, include any new cached policies (if any) then clear the list.
         for i in range(num_workers):
             task_queue.put((
-                copy.deepcopy(policy_model.state_dict()),
-                copy.deepcopy(value_model.state_dict()),
+                get_cpu_state(policy_model),
+                get_cpu_state(value_model),
                 gamma,
                 lam,
                 rollouts_per_worker,
@@ -330,9 +331,6 @@ def main():
         advantages = torch.cat(advantages_, dim=0).to(device)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        policy_model.to(device)
-        value_model.to(device)
-
         with torch.no_grad():
             log_probs_old, _ = policy_model.log_probs(states, actions, masks)
 
@@ -357,9 +355,6 @@ def main():
             value_optimizer.step()
             value_loss += new_value_loss.item()
             value_grad_norm += sum(p.grad.data.norm(2).item() ** 2 for p in value_model.parameters() if p.grad is not None) ** 0.5
-
-        policy_model.cpu()
-        value_model.cpu()
 
         win_percentage = wins_total / total_rollouts
 
@@ -403,11 +398,13 @@ def main():
             saturation_counter = 0
 
         if saturation_counter >= saturation_threshold:
-            save_main_state(policy_model.state_dict(), value_model.state_dict(),
+            policy_cpu_state = get_cpu_state(policy_model)
+            value_cpu_state = get_cpu_state(value_model)
+            save_main_state(policy_cpu_state, value_cpu_state,
                             policy_optimizer.state_dict(), value_optimizer.state_dict(),
                             base_name="latest")
-            elo_manager.add_new_policy(policy_model, value_model)
-            new_opponent_policy = policy_model.state_dict()
+            elo_manager.add_new_policy(policy_cpu_state, value_cpu_state)
+            new_opponent_policy = policy_cpu_state
             saturation_counter = 0
             max_policy = max(elo_manager.pool, key=lambda entry: entry['elo'])
             save_models(max_policy['policy_params'], max_policy['value_params'], base_name="latest_max_elo")
