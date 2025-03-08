@@ -241,7 +241,9 @@ def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, mas
     clipped = torch.clamp(ratio, 1 - clip_param, 1 + clip_param) * advantages
     loss = -(torch.min(ratio * advantages, clipped)).mean()
     approximate_kl = (log_probs_old - log_probs).mean().item()
-    return loss, approximate_kl, entropy
+    clipped = ratio.gt(1+clip_param) | ratio.lt(1-clip_param)
+    clipfrac = torch.as_tensor(clipped, dtype=torch.float32).mean().item()
+    return loss, approximate_kl, entropy, clipfrac
 
 def main():
     writer = SummaryWriter(log_dir="runs/othello_experiment_ppo")
@@ -307,7 +309,7 @@ def main():
 
     num_iterations = 300000000
     num_workers = 16
-    rollouts_per_worker = 2048 // num_workers
+    rollouts_per_worker = 256 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
     if len(elo_manager.pool) == 0:
@@ -398,17 +400,22 @@ def main():
         with torch.no_grad():
             log_probs_old, _ = policy_model.log_probs(states, actions, masks)
 
+        avgclipfrac = 0
+
         policy_loss = 0
         policy_grad_norm = 0
         for i in range(num_policy_steps):
             policy_optimizer.zero_grad()
-            new_policy_loss, kl, mean_policy_entropy = ppo_clip_loss(policy_model, states, actions, masks, advantages, log_probs_old, clip_param)
+            new_policy_loss, kl, mean_policy_entropy, clipfrac = ppo_clip_loss(policy_model, states, actions, masks, advantages, log_probs_old, clip_param)
             if kl > 1.5 * target_kl:
                 break
             new_policy_loss.backward()
             policy_optimizer.step()
+            avgclipfrac += clipfrac
             policy_loss += new_policy_loss.item()
             policy_grad_norm += sum(p.grad.data.norm(2).item() ** 2 for p in policy_model.parameters() if p.grad is not None) ** 0.5
+
+        avgclipfrac /= i
 
         value_loss = 0
         value_grad_norm = 0
@@ -443,7 +450,7 @@ def main():
 
             elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
             writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
-            print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}, Steps: {i+1}")
+            print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}, Steps: {i+1}, CF: {avgclipfrac:.2f}")
 
             if elo_manager.smooth_current_policy_elo > best_elo:
                 best_elo = elo_manager.smooth_current_policy_elo
@@ -455,7 +462,7 @@ def main():
             else:
                 saturation_counter = 0
 
-            alpha = 2**(-1/10) # half-life of ten iterations
+            alpha = .975
             new_rates = torch.zeros_like(iteration_wins_vector, dtype=torch.float)
             played_mask = iteration_plays_vector > 0
             new_rates[played_mask] = iteration_wins_vector[played_mask].float() / iteration_plays_vector[played_mask].float()
