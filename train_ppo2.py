@@ -24,6 +24,11 @@ def save_checkpoint(path, iteration, seed, policy_state, value_state,
         "best_elo": best_elo,
         "best_policy_state": best_policy_state,
         "best_value_state": best_value_state,
+        # Save RNG states
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "numpy_rng_state": np.random.get_state(),
+        "python_rng_state": random.getstate(),
     }
     torch.save(checkpoint, path)
 
@@ -38,7 +43,11 @@ def load_checkpoint(path):
             checkpoint["elo_manager"],
             checkpoint["best_elo"],
             checkpoint["best_policy_state"],
-            checkpoint["best_value_state"])
+            checkpoint["best_value_state"],
+            checkpoint["torch_rng_state"],
+            checkpoint["cuda_rng_state"],
+            checkpoint["numpy_rng_state"],
+            checkpoint["python_rng_state"])
 
 class EloManager:
     def __init__(self, initial_elo=1200, smoothing_coef=0.95):
@@ -117,7 +126,7 @@ def discount_cumsum(x, discount):
 def get_cpu_state(model):
     return {k: v.cpu() for k, v in model.state_dict().items()}
 
-def generate_experience(policy_params, value_params, cached_opponent_policies, gamma, lam, num_rollouts):
+def generate_experience(policy_params, value_params, cached_opponent_policies, gamma, lam, num_rollouts, opponent_probs):
     with torch.no_grad():
         policy_model = Policy(othello.BOARD_SIZE**2)
         policy_model.load_state_dict(policy_params)
@@ -133,13 +142,19 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
 
         states, actions, masks, returns, advantages = [], [], [], [], []
 
-        opponent_indices = []
-        full_rounds = num_rollouts // num_opponents
-        remainder = num_rollouts % num_opponents
-        for _ in range(full_rounds):
-            opponent_indices.extend(range(num_opponents))
-        if remainder > 0:
-            opponent_indices.extend(random.sample(range(num_opponents), remainder))
+        # Sample opponent indices based on the provided opponent_probs.
+        if opponent_probs is None:
+            # Fall back to uniform sampling if no probabilities provided.
+            opponent_indices = []
+            full_rounds = num_rollouts // num_opponents
+            remainder = num_rollouts % num_opponents
+            for _ in range(full_rounds):
+                opponent_indices.extend(range(num_opponents))
+            if remainder > 0:
+                opponent_indices.extend(random.sample(range(num_opponents), remainder))
+        else:
+            # Sample with replacement using the probabilities.
+            opponent_indices = np.random.choice(num_opponents, size=num_rollouts, replace=True, p=opponent_probs)
 
         for opponent_index in opponent_indices:
             rollout_states, rollout_actions, rollout_masks, rollout_rewards = [], [], [], []
@@ -165,7 +180,7 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
             rollout_returns = discount_cumsum(rollout_rewards, gamma)
             deltas = rollout_rewards + gamma * torch.cat([rollout_values[1:], torch.zeros(1)]) - rollout_values
             rollout_advantages = discount_cumsum(deltas, gamma * lam)
-            
+
             if reward > 0:
                 wins += 1
                 wins_vector[opponent_index] += 1
@@ -189,7 +204,9 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
                 wins, draws,
                 wins_vector, draws_vector, plays_vector)
 
+
 def worker_process(worker_id, task_queue, result_queue, initial_cached_policies, seed):
+    # Set worker RNGs (no CUDA used here)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -200,13 +217,15 @@ def worker_process(worker_id, task_queue, result_queue, initial_cached_policies,
         task = task_queue.get()
         if task is None:
             break
-        policy_state, value_state, gamma, lam, num_rollouts, new_opponent_policy = task
+        # Unpack the new opponent_probs from the task tuple.
+        policy_state, value_state, gamma, lam, num_rollouts, new_opponent_policy, opponent_probs = task
         if new_opponent_policy:
             new_policy = Policy(othello.BOARD_SIZE**2)
             new_policy.load_state_dict(new_opponent_policy)
             cached_opponent_policies.append(new_policy)
-        result = generate_experience(policy_state, value_state, cached_opponent_policies, gamma, lam, num_rollouts)
+        result = generate_experience(policy_state, value_state, cached_opponent_policies, gamma, lam, num_rollouts, opponent_probs)
         result_queue.put(result)
+
 
 def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, masks: torch.Tensor,
                   advantages: torch.Tensor, log_probs_old: torch.Tensor, clip_param: float):
@@ -218,7 +237,7 @@ def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, mas
     return loss, approximate_kl, entropy
 
 def main():
-    writer = SummaryWriter(log_dir="runs/othello_experiment_ppo2")
+    writer = SummaryWriter(log_dir="runs/othello_experiment_ppo")
     checkpoint_path = "checkpoint.pth"
     initial_elo = 1200
     start_iteration = 0
@@ -242,7 +261,11 @@ def main():
          elo_manager_state,
          best_elo,
          best_policy_state,
-         best_value_state) = load_checkpoint(checkpoint_path)
+         best_value_state,
+         torch_rng_state,
+         cuda_rng_state,
+         numpy_rng_state,
+         python_rng_state) = load_checkpoint(checkpoint_path)
         policy_model.load_state_dict(policy_state)
         value_model.load_state_dict(value_state)
         policy_model.to(device)
@@ -251,6 +274,11 @@ def main():
         value_optimizer.load_state_dict(value_opt_state)
         elo_manager = EloManager(initial_elo=initial_elo)
         elo_manager.load_state_dict(elo_manager_state)
+        torch.set_rng_state(torch_rng_state)
+        if cuda_rng_state is not None:
+            torch.cuda.set_rng_state_all(cuda_rng_state)
+        np.random.set_state(numpy_rng_state)
+        random.setstate(python_rng_state)
         print(f"Resuming from iteration {start_iteration}.")
     else:
         policy_model.to(device)
@@ -259,10 +287,9 @@ def main():
         best_elo = initial_elo
         best_policy_state = get_cpu_state(policy_model)
         best_value_state = get_cpu_state(value_model)
-
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
 
     gamma = 0.99
     lam = 0.95
@@ -273,7 +300,7 @@ def main():
 
     num_iterations = 300000000
     num_workers = 16
-    rollouts_per_worker = 1024 // num_workers
+    rollouts_per_worker = 2048 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
     if len(elo_manager.pool) == 0:
@@ -285,6 +312,7 @@ def main():
     saturation_counter = 0
     saturation_threshold = 20
     win_threshold = 0.51
+    smoothed_rates = None
 
     prev_pool_size = len(elo_manager.pool)
     accum_wins_vector = torch.zeros(prev_pool_size, dtype=int)
@@ -299,9 +327,26 @@ def main():
         p.start()
         workers.append(p)
 
-    checkpoint_interval = 20
+    checkpoint_interval = 200
 
     for iteration in range(start_iteration, num_iterations):
+        if smoothed_rates is None:
+            opponent_probs = None  # Use uniform sampling
+        else:
+            # Compute weights proportional to (1 - smoothed_rate)
+            weights = 1 - smoothed_rates
+            weights = torch.clamp(weights, min=0)
+            total = weights.sum().item()
+            if total > 0:
+                # Normalize weights and force exact normalization
+                probs = (weights / total).tolist()
+                probs = np.array(probs, dtype=np.float64)
+                probs = (probs / probs.sum()).tolist()  # Now sum(probs) should be exactly 1
+                opponent_probs = probs
+            else:
+                opponent_probs = [1.0 / len(weights)] * len(weights)
+
+
         policy_cpu_state = get_cpu_state(policy_model)
         value_cpu_state = get_cpu_state(value_model)
         for i in range(num_workers):
@@ -312,8 +357,10 @@ def main():
                 lam,
                 rollouts_per_worker,
                 new_opponent_policy,
+                opponent_probs,
             ))
         new_opponent_policy = None
+
 
         states_, actions_, masks_, returns_, advantages_ = [], [], [], [], []
         iteration_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
@@ -392,14 +439,6 @@ def main():
         writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
         print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}, Steps: {i+1}")
 
-        with open("win_rate_data.txt", "w") as f:
-            for i in range(len(accum_wins_vector)):
-                plays = accum_plays_vector[i].item()
-                wins = accum_wins_vector[i].item()
-                win_fraction = wins / plays if plays > 0 else 0
-                f.write(f"{win_fraction:.3f}\n")
-
-
         if elo_manager.smooth_current_policy_elo > best_elo:
             best_elo = elo_manager.smooth_current_policy_elo
             best_policy_state = get_cpu_state(policy_model)
@@ -410,7 +449,23 @@ def main():
         else:
             saturation_counter = 0
 
-        if saturation_counter >= saturation_threshold:
+        alpha = 2**(-1/10)
+        new_rates = torch.zeros_like(iteration_wins_vector, dtype=torch.float)
+        played_mask = iteration_plays_vector > 0
+        new_rates[played_mask] = iteration_wins_vector[played_mask].float() / iteration_plays_vector[played_mask].float()
+        if smoothed_rates is None:
+            smoothed_rates = new_rates.clone()
+        else:
+            smoothed_rates[played_mask] = alpha * smoothed_rates[played_mask] + (1 - alpha) * new_rates[played_mask]
+        N = min(.9*prev_pool_size+1,prev_pool_size-2)
+        ready = played_mask.all() and (smoothed_rates[:N] > 0.8).all()
+
+        with open("winrate.txt", "w") as f:
+            for i in range(len(accum_wins_vector)):
+                f.write(f"{smoothed_rates[i]:.3f}\n")
+
+        if saturation_counter >= saturation_threshold and ready:
+            smoothed_rates = None
             policy_cpu_state = get_cpu_state(policy_model)
             value_cpu_state = get_cpu_state(value_model)
             elo_manager.add_new_policy(policy_cpu_state, value_cpu_state)

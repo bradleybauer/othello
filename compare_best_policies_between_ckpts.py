@@ -3,10 +3,15 @@ import torch
 import numpy as np
 import random
 import torch.multiprocessing as mp
+from train_ppo import EloManager
 
 import othello
 from othello_env import OthelloEnv
 from policy_function import Policy
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+
 
 def load_checkpoint(path):
     checkpoint = torch.load(path, map_location="cpu")
@@ -101,7 +106,9 @@ def main():
 
     # Extract best policy states from each checkpoint.
     best_policy_state1 = cp1["best_policy_state"]
-    best_policy_state2 = cp2["best_policy_state"]
+    em = EloManager()
+    em.load_state_dict(cp2["elo_manager"])
+    best_policy_state2 = em.pool[len(em.pool)//2]["policy_params"]
 
     print("Evaluating")
     wins1, draws1, losses1 = evaluate_policy(best_policy_state1, best_policy_state2, num_games=args.games)

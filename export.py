@@ -5,7 +5,6 @@ from policy_function import Policy
 from value_function import Value
 
 def load_best_models(checkpoint_path):
-    # Load the checkpoint (assumed to be saved with keys "best_policy_state" and "best_value_state")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     best_policy_state = checkpoint["best_policy_state"]
     best_value_state = checkpoint["best_value_state"]
