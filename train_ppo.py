@@ -342,11 +342,7 @@ def main():
         else:
             weights = compute_opponent_weights(smoothed_rates, threshold=0.81, steepness=30)
             # Find which opponents have been played at least twice.
-            valid_mask = (accum_plays_vector >= 2)
-            if valid_mask.sum() > 0:
-                max_valid_weight = weights[valid_mask].max()
-            else:
-                max_valid_weight = 1.0  # fallback value if none are valid yet
+            max_valid_weight = weights.max()
             # For opponents with fewer than 2 plays, assign the max valid weight.
             weights[accum_plays_vector < 2] = max_valid_weight
             weights = torch.clamp(weights, min=0)
@@ -358,6 +354,7 @@ def main():
                 opponent_probs = (opponent_probs / opponent_probs.sum()).tolist()
             else:
                 opponent_probs = [1.0 / len(weights)] * len(weights)
+
 
 
         policy_cpu_state = get_cpu_state(policy_model)
