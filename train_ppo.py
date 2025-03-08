@@ -338,21 +338,27 @@ def main():
 
     for iteration in range(start_iteration, num_iterations):
         if smoothed_rates is None:
-            opponent_probs = None  # Uniform sampling fallback
+            opponent_probs = None  # uniform sampling fallback
         else:
             weights = compute_opponent_weights(smoothed_rates, threshold=0.81, steepness=30)
+            # Find which opponents have been played at least twice.
+            valid_mask = (accum_plays_vector >= 2)
+            if valid_mask.sum() > 0:
+                max_valid_weight = weights[valid_mask].max()
+            else:
+                max_valid_weight = 1.0  # fallback value if none are valid yet
+            # For opponents with fewer than 2 plays, assign the max valid weight.
+            weights[accum_plays_vector < 2] = max_valid_weight
             weights = torch.clamp(weights, min=0)
             total = weights.sum().item()
             if total > 0:
-                # Normalize the weights to get a probability distribution.
                 opponent_probs = (weights / total).tolist()
-                # Ensure exact normalization:
+                # Force exact normalization:
                 opponent_probs = np.array(opponent_probs, dtype=np.float64)
                 opponent_probs = (opponent_probs / opponent_probs.sum()).tolist()
-                # print(" | ".join([f"opp {i}: w={w:.3f}, prob={p:.3f}" 
-                #  for i, (w, p) in enumerate(zip(weights.tolist(), opponent_probs))]))
             else:
                 opponent_probs = [1.0 / len(weights)] * len(weights)
+
 
         policy_cpu_state = get_cpu_state(policy_model)
         value_cpu_state = get_cpu_state(value_model)
@@ -464,7 +470,7 @@ def main():
             smoothed_rates = new_rates.clone()
         else:
             smoothed_rates[played_mask] = alpha * smoothed_rates[played_mask] + (1 - alpha) * new_rates[played_mask]
-        N = min(.9*prev_pool_size+1,prev_pool_size-2)
+        N = min(int(.9 * prev_pool_size + 1), prev_pool_size - 2)
         ready = (accum_plays_vector > 0).all() and (smoothed_rates[:N] > 0.8).all()
 
         with open("winrate.txt", "w") as f:
