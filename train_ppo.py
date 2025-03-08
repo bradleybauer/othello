@@ -226,6 +226,13 @@ def worker_process(worker_id, task_queue, result_queue, initial_cached_policies,
         result = generate_experience(policy_state, value_state, cached_opponent_policies, gamma, lam, num_rollouts, opponent_probs)
         result_queue.put(result)
 
+def compute_opponent_weights(smoothed_rates, threshold=0.84, steepness=30):
+    # Base weight is 1 - win_rate.
+    base_weights = 1 - smoothed_rates
+    # Apply a logistic penalty: when smoothed_rate > threshold, the penalty factor quickly drops.
+    penalty = 1 / (1 + torch.exp(steepness * (smoothed_rates - threshold)))
+    weights = base_weights * penalty
+    return weights
 
 def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, masks: torch.Tensor,
                   advantages: torch.Tensor, log_probs_old: torch.Tensor, clip_param: float):
@@ -331,21 +338,22 @@ def main():
 
     for iteration in range(start_iteration, num_iterations):
         if smoothed_rates is None:
-            opponent_probs = None  # Use uniform sampling
+            opponent_probs = None  # Uniform sampling fallback
         else:
-            # Compute weights proportional to (1 - smoothed_rate)
-            weights = 1 - smoothed_rates
+            weights = compute_opponent_weights(smoothed_rates, threshold=0.84, steepness=30)
             weights = torch.clamp(weights, min=0)
             total = weights.sum().item()
             if total > 0:
-                # Normalize weights and force exact normalization
-                probs = (weights / total).tolist()
-                probs = np.array(probs, dtype=np.float64)
-                probs = (probs / probs.sum()).tolist()  # Now sum(probs) should be exactly 1
-                opponent_probs = probs
+                # Normalize the weights to get a probability distribution.
+                opponent_probs = (weights / total).tolist()
+                # Ensure exact normalization:
+                opponent_probs = np.array(opponent_probs, dtype=np.float64)
+                opponent_probs = (opponent_probs / opponent_probs.sum()).tolist()
+                # print(" | ".join([f"opp {i}: w={w:.3f}, prob={p:.3f}" 
+                #  for i, (w, p) in enumerate(zip(weights.tolist(), opponent_probs))]))
+                print("weights:", ' '.join([f"{w:.3f}" for w in weights.tolist()]), "probs:", ' '.join([f"{p:.3f}" for p in opponent_probs]))
             else:
                 opponent_probs = [1.0 / len(weights)] * len(weights)
-
 
         policy_cpu_state = get_cpu_state(policy_model)
         value_cpu_state = get_cpu_state(value_model)
@@ -458,7 +466,7 @@ def main():
         else:
             smoothed_rates[played_mask] = alpha * smoothed_rates[played_mask] + (1 - alpha) * new_rates[played_mask]
         N = min(.9*prev_pool_size+1,prev_pool_size-2)
-        ready = played_mask.all() and (smoothed_rates[:N] > 0.8).all()
+        ready = (accum_plays_vector > 0).all() and (smoothed_rates[:N] > 0.8).all()
 
         with open("winrate.txt", "w") as f:
             for i in range(len(accum_wins_vector)):
