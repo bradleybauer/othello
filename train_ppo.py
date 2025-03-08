@@ -431,66 +431,68 @@ def main():
         writer.add_scalar("Training/ValueGradNorm", value_grad_norm, iteration)
         writer.add_scalar("Training/PolicyEntropy", mean_policy_entropy, iteration)
 
-        if len(elo_manager.pool) != prev_pool_size:
-            accum_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
-            accum_draws_vector = torch.zeros(len(elo_manager.pool), dtype=int)
-            accum_plays_vector = torch.zeros(len(elo_manager.pool), dtype=int)
-            prev_pool_size = len(elo_manager.pool)
-        accum_wins_vector += iteration_wins_vector
-        accum_draws_vector += iteration_draws_vector
-        accum_plays_vector += iteration_plays_vector
+        with torch.no_grad():
+            if len(elo_manager.pool) != prev_pool_size:
+                accum_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+                accum_draws_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+                accum_plays_vector = torch.zeros(len(elo_manager.pool), dtype=int)
+                prev_pool_size = len(elo_manager.pool)
+            accum_wins_vector += iteration_wins_vector
+            accum_draws_vector += iteration_draws_vector
+            accum_plays_vector += iteration_plays_vector
 
-        elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
-        writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
-        print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}, Steps: {i+1}")
+            elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
+            writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
+            print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}, Steps: {i+1}")
 
-        if elo_manager.smooth_current_policy_elo > best_elo:
-            best_elo = elo_manager.smooth_current_policy_elo
-            best_policy_state = get_cpu_state(policy_model)
-            best_value_state = get_cpu_state(value_model)
+            if elo_manager.smooth_current_policy_elo > best_elo:
+                best_elo = elo_manager.smooth_current_policy_elo
+                best_policy_state = get_cpu_state(policy_model)
+                best_value_state = get_cpu_state(value_model)
 
-        if win_percentage >= win_threshold:
-            saturation_counter += 1
-        else:
-            saturation_counter = 0
+            if win_percentage >= win_threshold:
+                saturation_counter += 1
+            else:
+                saturation_counter = 0
 
-        alpha = 2**(-1/10) # half-life of ten iterations
-        new_rates = torch.zeros_like(iteration_wins_vector, dtype=torch.float)
-        played_mask = iteration_plays_vector > 0
-        new_rates[played_mask] = iteration_wins_vector[played_mask].float() / iteration_plays_vector[played_mask].float()
-        if smoothed_rates is None:
-            smoothed_rates = torch.max(torch.full_like(new_rates,.5), .9 * new_rates)
-        else:
-            smoothed_rates[played_mask] = alpha * smoothed_rates[played_mask] + (1 - alpha) * new_rates[played_mask]
-        N = min(int(.9 * prev_pool_size + 1), prev_pool_size - 2)
-        ready = (accum_plays_vector > 0).all() and (smoothed_rates[:N] > 0.8).all()
+            alpha = 2**(-1/10) # half-life of ten iterations
+            new_rates = torch.zeros_like(iteration_wins_vector, dtype=torch.float)
+            played_mask = iteration_plays_vector > 0
+            new_rates[played_mask] = iteration_wins_vector[played_mask].float() / iteration_plays_vector[played_mask].float()
+            if smoothed_rates is None:
+                smoothed_rates = new_rates
+            else:
+                smoothed_rates[played_mask] = alpha * smoothed_rates[played_mask] + (1 - alpha) * new_rates[played_mask]
+            smoothed_rates = torch.min(smoothed_rates, torch.full_like(smoothed_rates,.93))
+            N = min(int(.9 * prev_pool_size + 1), prev_pool_size - 2)
+            ready = (accum_plays_vector > 0).all() and (smoothed_rates[:N] > 0.8).all()
 
-        with open("winrate.txt", "w") as f:
-            for i in range(len(accum_wins_vector)):
-                f.write(f"{smoothed_rates[i]:.4f} {opponent_probs[i] if opponent_probs else 1/len(accum_wins_vector):.4f}\n")
+            with open("winrate.txt", "w") as f:
+                for i in range(len(accum_wins_vector)):
+                    f.write(f"{smoothed_rates[i]:.4f} {opponent_probs[i] if opponent_probs else 1/len(accum_wins_vector):.4f}\n")
 
-        if saturation_counter >= saturation_threshold and ready:
-            smoothed_rates = None
-            policy_cpu_state = get_cpu_state(policy_model)
-            value_cpu_state = get_cpu_state(value_model)
-            elo_manager.add_new_policy(policy_cpu_state, value_cpu_state)
-            new_opponent_policy = policy_cpu_state
-            saturation_counter = 0
+            if saturation_counter >= saturation_threshold and ready:
+                smoothed_rates = torch.cat([smoothed_rates, torch.tensor([.5])], dim=0)
+                policy_cpu_state = get_cpu_state(policy_model)
+                value_cpu_state = get_cpu_state(value_model)
+                elo_manager.add_new_policy(policy_cpu_state, value_cpu_state)
+                new_opponent_policy = policy_cpu_state
+                saturation_counter = 0
 
-        if iteration % checkpoint_interval == 0 and iteration > start_iteration:
-            save_checkpoint(
-                checkpoint_path,
-                iteration,
-                seed,
-                get_cpu_state(policy_model),
-                get_cpu_state(value_model),
-                policy_optimizer.state_dict(),
-                value_optimizer.state_dict(),
-                elo_manager.state_dict(),
-                best_elo,
-                best_policy_state,
-                best_value_state
-            )
+            if iteration % checkpoint_interval == 0 and iteration > start_iteration:
+                save_checkpoint(
+                    checkpoint_path,
+                    iteration,
+                    seed,
+                    get_cpu_state(policy_model),
+                    get_cpu_state(value_model),
+                    policy_optimizer.state_dict(),
+                    value_optimizer.state_dict(),
+                    elo_manager.state_dict(),
+                    best_elo,
+                    best_policy_state,
+                    best_value_state
+                )
 
     writer.close()
     for _ in range(num_workers):
