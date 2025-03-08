@@ -340,7 +340,7 @@ def main():
         if smoothed_rates is None:
             opponent_probs = None
         else:
-            weights = compute_opponent_weights(smoothed_rates, threshold=0.81, steepness=30)
+            weights = compute_opponent_weights(smoothed_rates, threshold=0.8, steepness=30)
             weights = torch.clamp(weights, min=0)
             total = weights.sum().item()
             if total > 0:
@@ -454,12 +454,12 @@ def main():
         else:
             saturation_counter = 0
 
-        alpha = 2**(-1/10)
+        alpha = 2**(-1/10) # half-life of ten iterations
         new_rates = torch.zeros_like(iteration_wins_vector, dtype=torch.float)
         played_mask = iteration_plays_vector > 0
         new_rates[played_mask] = iteration_wins_vector[played_mask].float() / iteration_plays_vector[played_mask].float()
         if smoothed_rates is None:
-            smoothed_rates = new_rates.clone()
+            smoothed_rates = torch.max(torch.full_like(new_rates,.5), .9 * new_rates)
         else:
             smoothed_rates[played_mask] = alpha * smoothed_rates[played_mask] + (1 - alpha) * new_rates[played_mask]
         N = min(int(.9 * prev_pool_size + 1), prev_pool_size - 2)
