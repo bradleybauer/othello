@@ -117,12 +117,8 @@ def discount_cumsum(x, discount):
 def get_cpu_state(model):
     return {k: v.cpu() for k, v in model.state_dict().items()}
 
-def generate_experience(policy_params, value_params, cached_opponent_policies, gamma, lam, num_rollouts, seed):
+def generate_experience(policy_params, value_params, cached_opponent_policies, gamma, lam, num_rollouts):
     with torch.no_grad():
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-
         policy_model = Policy(othello.BOARD_SIZE**2)
         policy_model.load_state_dict(policy_params)
         value_model = Value(othello.BOARD_SIZE**2)
@@ -131,10 +127,8 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
         num_opponents = len(cached_opponent_policies)
         wins = 0
         draws = 0
-        losses = 0
         wins_vector = torch.zeros(num_opponents, dtype=int)
         draws_vector = torch.zeros(num_opponents, dtype=int)
-        losses_vector = torch.zeros(num_opponents, dtype=int)
         plays_vector = torch.zeros(num_opponents, dtype=int)
 
         states, actions, masks, returns, advantages = [], [], [], [], []
@@ -178,9 +172,6 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
             elif reward == 0:
                 draws += 1
                 draws_vector[opponent_index] += 1
-            else:
-                losses += 1
-                losses_vector[opponent_index] += 1
             plays_vector[opponent_index] += 1
 
             states.append(rollout_states)
@@ -195,10 +186,13 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
         advantages = torch.hstack(advantages)
         returns = torch.hstack(returns)
         return (states, actions, masks, returns, advantages,
-                wins, draws, losses,
-                wins_vector, draws_vector, losses_vector, plays_vector)
+                wins, draws,
+                wins_vector, draws_vector, plays_vector)
 
-def worker_process(worker_id, task_queue, result_queue, initial_cached_policies):
+def worker_process(worker_id, task_queue, result_queue, initial_cached_policies, seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     cached_opponent_policies = [Policy(othello.BOARD_SIZE**2) for _ in initial_cached_policies]
     for policy, params in zip(cached_opponent_policies, initial_cached_policies):
         policy.load_state_dict(params)
@@ -206,12 +200,12 @@ def worker_process(worker_id, task_queue, result_queue, initial_cached_policies)
         task = task_queue.get()
         if task is None:
             break
-        policy_state, value_state, gamma, lam, num_rollouts, seed, new_opponent_policy = task
+        policy_state, value_state, gamma, lam, num_rollouts, new_opponent_policy = task
         if new_opponent_policy:
             new_policy = Policy(othello.BOARD_SIZE**2)
             new_policy.load_state_dict(new_opponent_policy)
             cached_opponent_policies.append(new_policy)
-        result = generate_experience(policy_state, value_state, cached_opponent_policies, gamma, lam, num_rollouts, seed)
+        result = generate_experience(policy_state, value_state, cached_opponent_policies, gamma, lam, num_rollouts)
         result_queue.put(result)
 
 def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, masks: torch.Tensor,
@@ -295,14 +289,13 @@ def main():
     prev_pool_size = len(elo_manager.pool)
     accum_wins_vector = torch.zeros(prev_pool_size, dtype=int)
     accum_draws_vector = torch.zeros(prev_pool_size, dtype=int)
-    accum_losses_vector = torch.zeros(prev_pool_size, dtype=int)
     accum_plays_vector = torch.zeros(prev_pool_size, dtype=int)
 
     task_queue = mp.Queue()
     result_queue = mp.Queue()
     workers = []
     for worker_id in range(num_workers):
-        p = mp.Process(target=worker_process, args=(worker_id, task_queue, result_queue, initial_cached_policies))
+        p = mp.Process(target=worker_process, args=(worker_id, task_queue, result_queue, initial_cached_policies, seed+worker_id))
         p.start()
         workers.append(p)
 
@@ -318,24 +311,20 @@ def main():
                 gamma,
                 lam,
                 rollouts_per_worker,
-                seed + i,
                 new_opponent_policy,
             ))
-        seed += num_workers
         new_opponent_policy = None
 
         states_, actions_, masks_, returns_, advantages_ = [], [], [], [], []
         iteration_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
         iteration_draws_vector = torch.zeros(len(elo_manager.pool), dtype=int)
-        iteration_losses_vector = torch.zeros(len(elo_manager.pool), dtype=int)
         iteration_plays_vector = torch.zeros(len(elo_manager.pool), dtype=int)
         wins_total = 0
         draws_total = 0
-        losses_total = 0
         results = [result_queue.get() for _ in range(num_workers)]
         for (states, actions, masks, returns, advantages,
-             wins_, draws_, losses_,
-             wins_vector_, draws_vector_, losses_vector_, plays_vector_) in results:
+             wins_, draws_,
+             wins_vector_, draws_vector_, plays_vector_) in results:
             states_.append(states)
             actions_.append(actions)
             masks_.append(masks)
@@ -343,10 +332,8 @@ def main():
             advantages_.append(advantages)
             wins_total += wins_
             draws_total += draws_
-            losses_total += losses_
             iteration_wins_vector += wins_vector_
             iteration_draws_vector += draws_vector_
-            iteration_losses_vector += losses_vector_
             iteration_plays_vector += plays_vector_
 
         states = torch.cat(states_, dim=0).to(device)
@@ -361,7 +348,7 @@ def main():
 
         policy_loss = 0
         policy_grad_norm = 0
-        for _ in range(num_policy_steps):
+        for i in range(num_policy_steps):
             policy_optimizer.zero_grad()
             new_policy_loss, kl, mean_policy_entropy = ppo_clip_loss(policy_model, states, actions, masks, advantages, log_probs_old, clip_param)
             if kl > 1.5 * target_kl:
@@ -395,13 +382,15 @@ def main():
         if len(elo_manager.pool) != prev_pool_size:
             accum_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
             accum_draws_vector = torch.zeros(len(elo_manager.pool), dtype=int)
-            accum_losses_vector = torch.zeros(len(elo_manager.pool), dtype=int)
             accum_plays_vector = torch.zeros(len(elo_manager.pool), dtype=int)
             prev_pool_size = len(elo_manager.pool)
         accum_wins_vector += iteration_wins_vector
         accum_draws_vector += iteration_draws_vector
-        accum_losses_vector += iteration_losses_vector
         accum_plays_vector += iteration_plays_vector
+
+        elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
+        writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
+        print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}, Steps: {i+1}")
 
         with open("win_rate_data.txt", "w") as f:
             for i in range(len(accum_wins_vector)):
@@ -410,9 +399,6 @@ def main():
                 win_fraction = wins / plays if plays > 0 else 0
                 f.write(f"{win_fraction:.3f}\n")
 
-        elo_manager.update_ratings(iteration_wins_vector, iteration_draws_vector, iteration_plays_vector)
-        writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
-        print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}")
 
         if elo_manager.smooth_current_policy_elo > best_elo:
             best_elo = elo_manager.smooth_current_policy_elo
