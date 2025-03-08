@@ -340,7 +340,7 @@ def main():
         if smoothed_rates is None:
             opponent_probs = None  # Uniform sampling fallback
         else:
-            weights = compute_opponent_weights(smoothed_rates, threshold=0.84, steepness=30)
+            weights = compute_opponent_weights(smoothed_rates, threshold=0.81, steepness=30)
             weights = torch.clamp(weights, min=0)
             total = weights.sum().item()
             if total > 0:
@@ -351,7 +351,6 @@ def main():
                 opponent_probs = (opponent_probs / opponent_probs.sum()).tolist()
                 # print(" | ".join([f"opp {i}: w={w:.3f}, prob={p:.3f}" 
                 #  for i, (w, p) in enumerate(zip(weights.tolist(), opponent_probs))]))
-                print("weights:", ' '.join([f"{w:.3f}" for w in weights.tolist()]), "probs:", ' '.join([f"{p:.3f}" for p in opponent_probs]))
             else:
                 opponent_probs = [1.0 / len(weights)] * len(weights)
 
@@ -470,7 +469,7 @@ def main():
 
         with open("winrate.txt", "w") as f:
             for i in range(len(accum_wins_vector)):
-                f.write(f"{smoothed_rates[i]:.3f}\n")
+                f.write(f"{smoothed_rates[i]:.4f} {opponent_probs[i] if opponent_probs else 1/len(accum_wins_vector):.4f}\n")
 
         if saturation_counter >= saturation_threshold and ready:
             smoothed_rates = None
