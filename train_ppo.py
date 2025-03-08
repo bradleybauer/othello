@@ -338,18 +338,13 @@ def main():
 
     for iteration in range(start_iteration, num_iterations):
         if smoothed_rates is None:
-            opponent_probs = None  # uniform sampling fallback
+            opponent_probs = None
         else:
             weights = compute_opponent_weights(smoothed_rates, threshold=0.81, steepness=30)
-            # Find which opponents have been played at least twice.
-            max_valid_weight = weights.max()
-            # For opponents with fewer than 2 plays, assign the max valid weight.
-            weights[accum_plays_vector < 2] = max_valid_weight
             weights = torch.clamp(weights, min=0)
             total = weights.sum().item()
             if total > 0:
                 opponent_probs = (weights / total).tolist()
-                # Force exact normalization:
                 opponent_probs = np.array(opponent_probs, dtype=np.float64)
                 opponent_probs = (opponent_probs / opponent_probs.sum()).tolist()
             else:
