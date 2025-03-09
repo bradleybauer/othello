@@ -8,4 +8,4 @@ During experience generation, opponents are sampled with probabilities inversely
 
 ![sampling](sampling.png)
 
-The left plot shows the current win rate for each opponent (indexed by i), while the right plot displays the sampling weight assigned to each opponent.
+The top plot shows the current win rate for each opponent, while the bottom plot displays the sampling weight assigned to each opponent.

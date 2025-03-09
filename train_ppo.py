@@ -1,3 +1,4 @@
+import time
 import os
 import torch
 import torch.optim as optim
@@ -10,12 +11,11 @@ from value_function import Value
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 
-def save_checkpoint(path, iteration, seed, policy_state, value_state,
+def save_checkpoint(path, iteration, policy_state, value_state,
                     policy_optimizer_state, value_optimizer_state, elo_manager_state,
                     best_elo, best_policy_state, best_value_state):
     checkpoint = {
         "iteration": iteration,
-        "seed": seed,
         "policy_state": policy_state,
         "value_state": value_state,
         "policy_optimizer_state": policy_optimizer_state,
@@ -24,18 +24,12 @@ def save_checkpoint(path, iteration, seed, policy_state, value_state,
         "best_elo": best_elo,
         "best_policy_state": best_policy_state,
         "best_value_state": best_value_state,
-        # Save RNG states
-        "torch_rng_state": torch.get_rng_state(),
-        "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        "numpy_rng_state": np.random.get_state(),
-        "python_rng_state": random.getstate(),
     }
     torch.save(checkpoint, path)
 
 def load_checkpoint(path):
     checkpoint = torch.load(path, map_location="cpu")
     return (checkpoint["iteration"],
-            checkpoint["seed"],
             checkpoint["policy_state"],
             checkpoint["value_state"],
             checkpoint["policy_optimizer_state"],
@@ -43,11 +37,7 @@ def load_checkpoint(path):
             checkpoint["elo_manager"],
             checkpoint["best_elo"],
             checkpoint["best_policy_state"],
-            checkpoint["best_value_state"],
-            checkpoint["torch_rng_state"],
-            checkpoint["cuda_rng_state"],
-            checkpoint["numpy_rng_state"],
-            checkpoint["python_rng_state"])
+            checkpoint["best_value_state"])
 
 class EloManager:
     def __init__(self, initial_elo=1200, smoothing_coef=0.95):
@@ -205,11 +195,7 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
                 wins_vector, draws_vector, plays_vector)
 
 
-def worker_process(worker_id, task_queue, result_queue, initial_cached_policies, seed):
-    # Set worker RNGs (no CUDA used here)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+def worker_process(worker_id, task_queue, result_queue, initial_cached_policies):
     cached_opponent_policies = [Policy(othello.BOARD_SIZE**2) for _ in initial_cached_policies]
     for policy, params in zip(cached_opponent_policies, initial_cached_policies):
         policy.load_state_dict(params)
@@ -235,22 +221,22 @@ def compute_opponent_weights(smoothed_rates, threshold=0.84, steepness=30):
     return weights
 
 def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, masks: torch.Tensor,
-                  advantages: torch.Tensor, log_probs_old: torch.Tensor, clip_param: float):
+                  advantages: torch.Tensor, log_probs_old: torch.Tensor, clip_param: float, entropy_coeff: float):
     log_probs, entropy = policy_model.log_probs(states, actions, masks)
+    mean_entropy = entropy.mean()
     ratio = torch.exp(log_probs - log_probs_old)
     clipped = torch.clamp(ratio, 1 - clip_param, 1 + clip_param) * advantages
-    loss = -(torch.min(ratio * advantages, clipped)).mean()
+    loss = -(torch.min(ratio * advantages, clipped)).mean() - entropy_coeff * mean_entropy
     approximate_kl = (log_probs_old - log_probs).mean().item()
     clipped = ratio.gt(1+clip_param) | ratio.lt(1-clip_param)
     clipfrac = torch.as_tensor(clipped, dtype=torch.float32).mean().item()
-    return loss, approximate_kl, entropy, clipfrac
+    return loss, approximate_kl, mean_entropy, clipfrac
 
 def main():
-    writer = SummaryWriter(log_dir="runs/othello_experiment_ppo")
+    writer = SummaryWriter(log_dir="runs/othello_experiment_ppo_entropy_reg")
     checkpoint_path = "checkpoint.pth"
     initial_elo = 1200
     start_iteration = 0
-    seed = 42
 
     device = torch.device("cuda")
     policy_model = Policy(othello.BOARD_SIZE**2)
@@ -262,7 +248,6 @@ def main():
     if os.path.exists(checkpoint_path):
         print("Loading checkpoint...")
         (start_iteration,
-         seed,
          policy_state,
          value_state,
          policy_opt_state,
@@ -270,11 +255,7 @@ def main():
          elo_manager_state,
          best_elo,
          best_policy_state,
-         best_value_state,
-         torch_rng_state,
-         cuda_rng_state,
-         numpy_rng_state,
-         python_rng_state) = load_checkpoint(checkpoint_path)
+         best_value_state) = load_checkpoint(checkpoint_path)
         policy_model.load_state_dict(policy_state)
         value_model.load_state_dict(value_state)
         policy_model.to(device)
@@ -283,11 +264,6 @@ def main():
         value_optimizer.load_state_dict(value_opt_state)
         elo_manager = EloManager(initial_elo=initial_elo)
         elo_manager.load_state_dict(elo_manager_state)
-        torch.set_rng_state(torch_rng_state)
-        if cuda_rng_state is not None:
-            torch.cuda.set_rng_state_all(cuda_rng_state)
-        np.random.set_state(numpy_rng_state)
-        random.setstate(python_rng_state)
         print(f"Resuming from iteration {start_iteration}.")
     else:
         policy_model.to(device)
@@ -296,12 +272,10 @@ def main():
         best_elo = initial_elo
         best_policy_state = get_cpu_state(policy_model)
         best_value_state = get_cpu_state(value_model)
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        random.seed(seed)
 
     gamma = 0.99
     lam = 0.95
+    entropy_coeff = .01
     clip_param = 0.2
     target_kl = 0.05
     num_policy_steps = 80
@@ -332,7 +306,7 @@ def main():
     result_queue = mp.Queue()
     workers = []
     for worker_id in range(num_workers):
-        p = mp.Process(target=worker_process, args=(worker_id, task_queue, result_queue, initial_cached_policies, seed+worker_id))
+        p = mp.Process(target=worker_process, args=(worker_id, task_queue, result_queue, initial_cached_policies))
         p.start()
         workers.append(p)
 
@@ -406,7 +380,7 @@ def main():
         policy_grad_norm = 0
         for i in range(num_policy_steps):
             policy_optimizer.zero_grad()
-            new_policy_loss, kl, mean_policy_entropy, clipfrac = ppo_clip_loss(policy_model, states, actions, masks, advantages, log_probs_old, clip_param)
+            new_policy_loss, kl, policy_entropy, clipfrac = ppo_clip_loss(policy_model, states, actions, masks, advantages, log_probs_old, clip_param, entropy_coeff)
             if kl > 1.5 * target_kl:
                 break
             new_policy_loss.backward()
@@ -427,18 +401,33 @@ def main():
             value_loss += new_value_loss.item()
             value_grad_norm += sum(p.grad.data.norm(2).item() ** 2 for p in value_model.parameters() if p.grad is not None) ** 0.5
 
-        win_percentage = wins_total / total_rollouts
-
-        writer.add_scalar("Training/PolicyLoss", policy_loss, iteration)
-        writer.add_scalar("Training/ValueLoss", value_loss, iteration)
-        writer.add_scalar("Training/PolicyKL", kl, iteration)
-        writer.add_scalar("Training/WinPercentage", win_percentage, iteration)
-        writer.add_scalar("Training/AverageReturn", returns.mean().item(), iteration)
-        writer.add_scalar("Training/PolicyGradNorm", policy_grad_norm, iteration)
-        writer.add_scalar("Training/ValueGradNorm", value_grad_norm, iteration)
-        writer.add_scalar("Training/PolicyEntropy", mean_policy_entropy, iteration)
-
         with torch.no_grad():
+
+            policy_cpu_state = get_cpu_state(policy_model)
+            value_cpu_state = get_cpu_state(value_model)
+
+            policy_weight_norms_sqd = 0.0
+            for _,param in policy_cpu_state.items():
+                policy_weight_norms_sqd += torch.sum(param ** 2)
+            policy_weight_norms = torch.sqrt(policy_weight_norms_sqd).item()
+
+            value_weight_norms_sqd = 0.0
+            for _,param in value_cpu_state.items():
+                value_weight_norms_sqd += torch.sum(param ** 2)
+            value_weight_norms = torch.sqrt(value_weight_norms_sqd).item()
+
+            win_percentage = wins_total / total_rollouts
+
+            writer.add_scalar("Training/PolicyLoss", policy_loss, iteration)
+            writer.add_scalar("Training/ValueLoss", value_loss, iteration)
+            writer.add_scalar("Training/PolicyKL", kl, iteration)
+            writer.add_scalar("Training/WinPercentage", win_percentage, iteration)
+            writer.add_scalar("Training/AverageReturn", returns.mean().item(), iteration)
+            writer.add_scalar("Training/PolicyGradNorm", policy_grad_norm, iteration)
+            writer.add_scalar("Training/ValueGradNorm", value_grad_norm, iteration)
+            writer.add_scalar("Training/PolicyEntropy", policy_entropy, iteration)
+            writer.add_scalar("Training/PolicyParamNorm", policy_weight_norms, iteration)
+            writer.add_scalar("Training/ValueParamNorm", value_weight_norms, iteration)
             if len(elo_manager.pool) != prev_pool_size:
                 accum_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
                 accum_draws_vector = torch.zeros(len(elo_manager.pool), dtype=int)
@@ -454,8 +443,8 @@ def main():
 
             if elo_manager.smooth_current_policy_elo > best_elo:
                 best_elo = elo_manager.smooth_current_policy_elo
-                best_policy_state = get_cpu_state(policy_model)
-                best_value_state = get_cpu_state(value_model)
+                best_policy_state = policy_cpu_state
+                best_value_state = value_cpu_state
 
             if win_percentage >= win_threshold:
                 saturation_counter += 1
@@ -480,8 +469,6 @@ def main():
 
             if saturation_counter >= saturation_threshold and ready:
                 smoothed_rates = torch.cat([smoothed_rates, torch.tensor([.5])], dim=0)
-                policy_cpu_state = get_cpu_state(policy_model)
-                value_cpu_state = get_cpu_state(value_model)
                 elo_manager.add_new_policy(policy_cpu_state, value_cpu_state)
                 new_opponent_policy = policy_cpu_state
                 saturation_counter = 0
@@ -490,16 +477,14 @@ def main():
                 save_checkpoint(
                     checkpoint_path,
                     iteration,
-                    seed,
-                    get_cpu_state(policy_model),
-                    get_cpu_state(value_model),
+                    policy_cpu_state,
+                    value_cpu_state,
                     policy_optimizer.state_dict(),
                     value_optimizer.state_dict(),
                     elo_manager.state_dict(),
                     best_elo,
                     best_policy_state,
-                    best_value_state
-                )
+                    best_value_state)
 
     writer.close()
     for _ in range(num_workers):

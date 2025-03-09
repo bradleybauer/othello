@@ -37,8 +37,7 @@ class Policy(nn.Module):
     def log_probs(self, states: torch.Tensor, flat_actions: torch.Tensor, masks: torch.Tensor) -> Tuple[torch.Tensor, float]:
         assert(flat_actions.shape == (states.shape[0],1))
         dists = self.dists(states, masks)
-        with torch.no_grad():
-            entropy = dists.entropy().mean().item()
+        entropy = dists.entropy()
         return dists.log_prob(flat_actions.squeeze(-1)), entropy
 
     def dists(self, states, masks):
