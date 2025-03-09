@@ -234,7 +234,7 @@ def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, mas
 
 def main():
     checkpoint_path = "checkpoint.pth"
-    initial_elo = 1200
+    initial_elo = 400
     start_iteration = 0
 
     device = torch.device("cuda")
@@ -272,13 +272,12 @@ def main():
         best_policy_state = get_cpu_state(policy_model)
         best_value_state = get_cpu_state(value_model)
 
-    #writer = SummaryWriter(log_dir="runs/ppo_entropy_reg_big_batch_diff_params")
-    writer = SummaryWriter(log_dir="runs/small")
+    writer = SummaryWriter(log_dir="runs/ppo_entropy_reg")
     gamma = 0.99
     lam = 0.95
     entropy_coeff = .01
     clip_param = 0.2
-    target_kl = 0.02
+    target_kl = 0.03
     num_policy_steps = 80
     num_value_steps = 80
 
@@ -385,7 +384,8 @@ def main():
             policy_optimizer.step()
             avgclipfrac += clipfrac
             policy_loss += new_policy_loss.item()
-            policy_grad_norm += sum(p.grad.data.norm(2).item() ** 2 for p in policy_model.parameters() if p.grad is not None) ** 0.5
+            # policy_grad_norm += sum(p.grad.data.norm(2).item() ** 2 for p in policy_model.parameters() if p.grad is not None) ** 0.5
+        policy_grad_norm /= num_policy_steps
 
         avgclipfrac /= i
 
@@ -397,22 +397,23 @@ def main():
             new_value_loss.backward()
             value_optimizer.step()
             value_loss += new_value_loss.item()
-            value_grad_norm += sum(p.grad.data.norm(2).item() ** 2 for p in value_model.parameters() if p.grad is not None) ** 0.5
+            # value_grad_norm += sum(p.grad.data.norm(2).item() ** 2 for p in value_model.parameters() if p.grad is not None) ** 0.5
+        value_grad_norm /= num_value_steps
 
         with torch.no_grad():
 
             policy_cpu_state = get_cpu_state(policy_model)
             value_cpu_state = get_cpu_state(value_model)
 
-            policy_weight_norms_sqd = 0.0
-            for _,param in policy_cpu_state.items():
-                policy_weight_norms_sqd += torch.sum(param ** 2)
-            policy_weight_norms = torch.sqrt(policy_weight_norms_sqd).item()
+            # policy_weight_norms_sqd = 0.0
+            # for _,param in policy_cpu_state.items():
+            #     policy_weight_norms_sqd += torch.sum(param ** 2)
+            # policy_weight_norms = torch.sqrt(policy_weight_norms_sqd).item()
 
-            value_weight_norms_sqd = 0.0
-            for _,param in value_cpu_state.items():
-                value_weight_norms_sqd += torch.sum(param ** 2)
-            value_weight_norms = torch.sqrt(value_weight_norms_sqd).item()
+            # value_weight_norms_sqd = 0.0
+            # for _,param in value_cpu_state.items():
+            #     value_weight_norms_sqd += torch.sum(param ** 2)
+            # value_weight_norms = torch.sqrt(value_weight_norms_sqd).item()
 
             win_percentage = wins_total / total_rollouts
 
@@ -420,12 +421,12 @@ def main():
             writer.add_scalar("Training/ValueLoss", value_loss, iteration)
             writer.add_scalar("Training/PolicyKL", kl, iteration)
             writer.add_scalar("Training/WinPercentage", win_percentage, iteration)
-            writer.add_scalar("Training/AverageReturn", returns.mean().item(), iteration)
-            writer.add_scalar("Training/PolicyGradNorm", policy_grad_norm, iteration)
-            writer.add_scalar("Training/ValueGradNorm", value_grad_norm, iteration)
+            # writer.add_scalar("Training/AverageReturn", returns.mean().item(), iteration)
+            # writer.add_scalar("Training/PolicyGradNorm", policy_grad_norm, iteration)
+            # writer.add_scalar("Training/ValueGradNorm", value_grad_norm, iteration)
             writer.add_scalar("Training/PolicyEntropy", policy_entropy, iteration)
-            writer.add_scalar("Training/PolicyParamNorm", policy_weight_norms, iteration)
-            writer.add_scalar("Training/ValueParamNorm", value_weight_norms, iteration)
+            # writer.add_scalar("Training/PolicyParamNorm", policy_weight_norms, iteration)
+            # writer.add_scalar("Training/ValueParamNorm", value_weight_norms, iteration)
             if len(elo_manager.pool) != prev_pool_size:
                 accum_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
                 accum_draws_vector = torch.zeros(len(elo_manager.pool), dtype=int)
@@ -492,4 +493,5 @@ def main():
 
 if __name__ == '__main__':
     mp.set_start_method('spawn', force=True)
+    torch.multiprocessing.set_sharing_strategy('file_system')
     main()
