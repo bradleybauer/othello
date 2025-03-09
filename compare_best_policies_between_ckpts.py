@@ -6,7 +6,7 @@ import torch.multiprocessing as mp
 from train_ppo import EloManager
 
 import othello
-from othello_env import OthelloEnv
+from othello_env import OthelloEnv, inflate_action
 from policy_function import Policy
 import matplotlib
 matplotlib.use('TkAgg')
@@ -36,7 +36,7 @@ def play_game(current_policy, opponent_policy):
         state_tensor = torch.from_numpy(state).reshape(1, -1).float()
         mask = torch.from_numpy(info['action_mask'])
         flat_action = current_policy.select_action(state_tensor, mask)
-        action = env.inflate_action(flat_action.item())
+        action = inflate_action(flat_action.item())
         state, reward, done, _, info = env.step(action)
     
     if reward > 0:
