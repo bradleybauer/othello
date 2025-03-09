@@ -1,11 +1,10 @@
-import time
 import os
 import torch
 import torch.optim as optim
 import numpy as np
 import random
 import othello
-from othello_env import OthelloEnv
+from othello_env import OthelloEnv, inflate_action
 from policy_function import Policy
 from value_function import Value
 import torch.multiprocessing as mp
@@ -159,7 +158,7 @@ def generate_experience(policy_params, value_params, cached_opponent_policies, g
                 rollout_masks.append(mask)
                 flat_action = policy_model.select_action(state_tensor, mask)
                 rollout_actions.append(flat_action)
-                action = env.inflate_action(flat_action.item())
+                action = inflate_action(flat_action.item())
                 state, reward, done, _, info = env.step(action)
                 rollout_rewards.append(reward)
             rollout_states = torch.concatenate(rollout_states, axis=0)
@@ -233,7 +232,6 @@ def ppo_clip_loss(policy_model, states: torch.Tensor, actions: torch.Tensor, mas
     return loss, approximate_kl, mean_entropy, clipfrac
 
 def main():
-    writer = SummaryWriter(log_dir="runs/othello_experiment_ppo_entropy_reg")
     checkpoint_path = "checkpoint.pth"
     initial_elo = 1200
     start_iteration = 0
@@ -242,7 +240,7 @@ def main():
     policy_model = Policy(othello.BOARD_SIZE**2)
     value_model = Value(othello.BOARD_SIZE**2)
 
-    policy_optimizer = optim.Adam(policy_model.parameters(), lr=0.0003)
+    policy_optimizer = optim.Adam(policy_model.parameters(), lr=0.001)
     value_optimizer = optim.Adam(value_model.parameters(), lr=0.0005)
 
     if os.path.exists(checkpoint_path):
@@ -273,17 +271,19 @@ def main():
         best_policy_state = get_cpu_state(policy_model)
         best_value_state = get_cpu_state(value_model)
 
+    #writer = SummaryWriter(log_dir="runs/ppo_entropy_reg_big_batch_diff_params")
+    writer = SummaryWriter(log_dir="runs/small")
     gamma = 0.99
     lam = 0.95
     entropy_coeff = .01
     clip_param = 0.2
-    target_kl = 0.05
-    num_policy_steps = 80
+    target_kl = 0.01
+    num_policy_steps = 320
     num_value_steps = 80
 
     num_iterations = 300000000
     num_workers = 16
-    rollouts_per_worker = 256 // num_workers
+    rollouts_per_worker = 1024 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
     if len(elo_manager.pool) == 0:
