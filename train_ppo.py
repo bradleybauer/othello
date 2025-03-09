@@ -198,6 +198,7 @@ def worker_process(worker_id, task_queue, result_queue, initial_cached_policies)
     cached_opponent_policies = [Policy(othello.BOARD_SIZE**2) for _ in initial_cached_policies]
     for policy, params in zip(cached_opponent_policies, initial_cached_policies):
         policy.load_state_dict(params)
+    torch.set_num_threads(1)
     while True:
         task = task_queue.get()
         if task is None:
@@ -283,7 +284,7 @@ def main():
 
     num_iterations = 300000000
     num_workers = 16
-    rollouts_per_worker = 1024 // num_workers
+    rollouts_per_worker = 256 // num_workers
     total_rollouts = num_workers * rollouts_per_worker
 
     if len(elo_manager.pool) == 0:
@@ -438,11 +439,6 @@ def main():
             writer.add_scalar("Training/PolicyElo", elo_manager.current_policy_elo, iteration)
             print(f"Iteration {iteration}: PLoss = {policy_loss:.3f}, VLoss = {value_loss:.3f}, Train win% = {win_percentage:.3f}, Pool size = {len(elo_manager.pool)}, Current Elo: {elo_manager.current_policy_elo:.1f}, Smoothed Elo: {elo_manager.smooth_current_policy_elo:.1f}, Steps: {i+1}, CF: {avgclipfrac:.2f}")
 
-            if elo_manager.smooth_current_policy_elo > best_elo:
-                best_elo = elo_manager.smooth_current_policy_elo
-                best_policy_state = policy_cpu_state
-                best_value_state = value_cpu_state
-
             if win_percentage >= win_threshold:
                 saturation_counter += 1
             else:
@@ -465,6 +461,11 @@ def main():
                     f.write(f"{smoothed_rates[i]:.4f} {opponent_probs[i] if opponent_probs else 1/len(accum_wins_vector):.4f}\n")
 
             if saturation_counter >= saturation_threshold and ready:
+                if elo_manager.smooth_current_policy_elo > best_elo:
+                    best_elo = elo_manager.smooth_current_policy_elo
+                    best_policy_state = policy_cpu_state
+                    best_value_state = value_cpu_state
+
                 smoothed_rates = torch.cat([smoothed_rates, torch.tensor([.5])], dim=0)
                 elo_manager.add_new_policy(policy_cpu_state, value_cpu_state)
                 new_opponent_policy = policy_cpu_state
