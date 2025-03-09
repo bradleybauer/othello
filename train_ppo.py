@@ -240,7 +240,7 @@ def main():
     policy_model = Policy(othello.BOARD_SIZE**2)
     value_model = Value(othello.BOARD_SIZE**2)
 
-    policy_optimizer = optim.Adam(policy_model.parameters(), lr=0.001)
+    policy_optimizer = optim.Adam(policy_model.parameters(), lr=0.0003)
     value_optimizer = optim.Adam(value_model.parameters(), lr=0.0005)
 
     if os.path.exists(checkpoint_path):
@@ -277,8 +277,8 @@ def main():
     lam = 0.95
     entropy_coeff = .01
     clip_param = 0.2
-    target_kl = 0.01
-    num_policy_steps = 320
+    target_kl = 0.02
+    num_policy_steps = 80
     num_value_steps = 80
 
     num_iterations = 300000000
@@ -312,6 +312,8 @@ def main():
 
     checkpoint_interval = 200
 
+    policy_cpu_state = get_cpu_state(policy_model)
+    value_cpu_state = get_cpu_state(value_model)
     for iteration in range(start_iteration, num_iterations):
         if smoothed_rates is None:
             opponent_probs = None
@@ -326,10 +328,6 @@ def main():
             else:
                 opponent_probs = [1.0 / len(weights)] * len(weights)
 
-
-
-        policy_cpu_state = get_cpu_state(policy_model)
-        value_cpu_state = get_cpu_state(value_model)
         for i in range(num_workers):
             task_queue.put((
                 policy_cpu_state,
@@ -341,7 +339,6 @@ def main():
                 opponent_probs,
             ))
         new_opponent_policy = None
-
 
         states_, actions_, masks_, returns_, advantages_ = [], [], [], [], []
         iteration_wins_vector = torch.zeros(len(elo_manager.pool), dtype=int)
