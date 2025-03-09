@@ -22,17 +22,25 @@ class Policy(nn.Module):
         """
         Select an action given an observation and a mask of legal actions.
         
+        In evaluation mode (deterministic), selects the action with highest probability.
+        In training mode, samples from the probability distribution.
+        
         Args:
             states (torch.Tensor): Tensor with shape (batch_size, board_size*board_size).
             masks (torch.Tensor): Binary tensor with shape (batch_size, board_size*board_size+1) indicating legal actions.
         
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
-                - action (torch.Tensor): Tensor of shape (batch_size, 2) with [row, col] pairs.
-                - log_prob (torch.Tensor): Tensor of log probabilities for the sampled actions.
+            torch.Tensor: Tensor of selected action indices.
         """
         dist = self.dists(states, masks)
-        return dist.sample()
+        if not self.training:
+            # Deterministic: choose the action with the highest probability
+            action = torch.argmax(dist.probs, dim=1)
+        else:
+            # Stochastic: sample from the distribution
+            action = dist.sample()
+        return action
+
     
     def log_probs(self, states: torch.Tensor, flat_actions: torch.Tensor, masks: torch.Tensor) -> Tuple[torch.Tensor, float]:
         assert(flat_actions.shape == (states.shape[0],1))
