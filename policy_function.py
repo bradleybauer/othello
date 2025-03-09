@@ -65,5 +65,5 @@ def masked_softmax(logits: torch.Tensor, masks: torch.Tensor, dim: int = -1) -> 
     Returns:
         torch.Tensor: The resulting probabilities after softmax.
     """
-    masked_logits: torch.Tensor = logits.masked_fill(masks < 0.99999, float('-inf'))
+    masked_logits: torch.Tensor = logits.masked_fill(masks < 0.5, -1e8)
     return F.softmax(masked_logits, dim=dim)
